@@ -106,7 +106,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -fsS http://localhost:3000/api/health/ready || exit 1
 
 # Start: apply migrations THEN start Node.js server
-# Use ./node_modules/.bin/prisma instead of npx to avoid npx trying to
-# fetch prisma from the registry (which fails when HOME is not writable
-# or when the registry is unreachable).
-CMD ["sh", "-c", "./node_modules/.bin/prisma migrate deploy && node server.js"]
+# Use npx --yes to run prisma (it's installed in node_modules but npm
+# install --no-save may not create .bin symlinks). HOME=/app is set so
+# npx can write its cache.
+CMD ["sh", "-c", "npx --yes prisma migrate deploy && node server.js"]
