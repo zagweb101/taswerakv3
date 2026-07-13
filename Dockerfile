@@ -76,28 +76,28 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 # Copy prisma migrations + schema for `prisma migrate deploy`
 COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
 
+# Copy the generated Prisma Client from builder (needed by @prisma/client)
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/.prisma ./node_modules/.prisma
+
+# Persistent volume for local-storage mode (ignored when using MinIO)
+RUN mkdir -p /app/.upload && chown -R nextjs:nodejs /app/.upload && \
+    mkdir -p /app/.npm && chown -R nextjs:nodejs /app/.npm
+VOLUME ["/app/.upload"]
+
+# Switch to non-root user BEFORE installing prisma so the npm cache
+# and node_modules are all owned by nextjs.
+USER nextjs
+
 # Install ONLY the prisma CLI + pg adapter runtime deps in the runner.
 # This is much faster than copying the entire builder node_modules
 # (which includes puppeteer's Chromium at ~300MB).
 # We use --no-save to avoid modifying package.json, --legacy-peer-deps
-# to match the lockfile. Do NOT use --omit=dev here because prisma is
-# listed as a devDependency in package.json — we need it installed
-# explicitly regardless.
+# to match the lockfile.
 RUN npm install --no-save --legacy-peer-deps \
     prisma@^7.8.0 \
     @prisma/client@^7.8.0 \
     @prisma/adapter-pg@^7.8.0 \
     pg@^8.13.1
-
-# Copy the generated Prisma Client from builder (needed by @prisma/client)
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/.prisma ./node_modules/.prisma
-
-# Persistent volume for local-storage mode (ignored when using MinIO)
-RUN mkdir -p /app/.upload && chown -R nextjs:nodejs /app/.upload
-VOLUME ["/app/.upload"]
-
-# Switch to non-root user
-USER nextjs
 
 EXPOSE 3000
 
