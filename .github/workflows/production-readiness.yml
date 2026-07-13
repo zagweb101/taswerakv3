@@ -97,7 +97,11 @@ jobs:
       DATABASE_URL: "postgresql://placeholder:placeholder@localhost:5432/placeholder?schema=public"
       AUTH_SECRET: "ci-build-placeholder-secret-aaaaaaaaaaaaaaaaaaaaa"
       NEXTAUTH_URL: "https://example.com"
-      NODE_ENV: "production"
+      # NOTE: Do NOT set NODE_ENV=production here — npm ci would skip
+      # devDependencies (prisma, typescript, vitest) and the postinstall
+      # `prisma generate` would fail with "prisma: not found".
+      # `next build` sets NODE_ENV=production internally for the build.
+      NODE_ENV: "development"
 
     steps:
       - uses: actions/checkout@v4
