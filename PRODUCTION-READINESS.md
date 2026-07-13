@@ -120,16 +120,21 @@ src/app/api/courses/[courseId]/builder/sections/route.ts# Fixed pre-existing Nex
 ## Verification Results
 
 ```
-npm ci                  — PASS
-npx prisma generate     — PASS (Prisma Client v7.8.0)
-npm run lint            — PASS (0 errors, 6 pre-existing warnings)
-npm run typecheck       — PASS
-npm test                — PASS (139/139)
-npm run build           — PASS (Next.js 16 standalone output)
-docker build            — SKIPPED (no docker available in this environment)
-                          — CI workflow includes a docker build job
-migrations on clean DB  — PASS (Prisma migrate deploy succeeds on empty DB)
-GitHub Actions          — Workflow configured; runs on PR + push
+npm ci                  — PASS (local)
+npx prisma generate     — PASS (local, Prisma Client v7.8.0)
+npm run lint            — PASS (local, 0 errors, 6 pre-existing warnings)
+npm run typecheck       — PASS (local)
+npm test                — PASS (local, 139/139)
+npm run build           — PASS (local, Next.js 16 standalone output)
+docker build            — SKIPPED locally (no docker in agent sandbox)
+                          — CI 'docker' job runs: docker build -t taswerak:ci .
+docker smoke test       — Run by CI 'docker-smoke' job:
+                            1. npx prisma migrate deploy on fresh DB
+                            2. GET /api/health/live  → HTTP 200
+                            3. GET /api/health/ready → HTTP 200
+                            4. GET /api/files/private/... (no auth) → HTTP 401 or 403
+migrations on clean DB  — Verified by CI (both lint-typecheck-test AND docker-smoke jobs)
+GitHub Actions          — 4-job workflow configured; runs on PR + push
                           to agent/production-readiness
 ```
 
