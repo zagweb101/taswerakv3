@@ -79,14 +79,16 @@ COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
 # Copy the generated Prisma Client from builder (needed by @prisma/client)
 COPY --from=builder --chown=nextjs:nodejs /app/node_modules/.prisma ./node_modules/.prisma
 
-# Install ONLY the prisma CLI + pg adapter runtime deps in the runner.
-# Run as root, then chown the results to nextjs.
-RUN npm install --no-save --legacy-peer-deps \
-    prisma@^7.8.0 \
-    @prisma/client@^7.8.0 \
-    @prisma/adapter-pg@^7.8.0 \
-    pg@^8.13.1 && \
-    chown -R nextjs:nodejs /app/node_modules /app/.npm
+# Copy prisma CLI + @prisma packages from builder (needed for migrate deploy)
+# These are copied from the builder's node_modules to avoid npm install issues
+# with --no-save not creating .bin symlinks or not resolving 'prisma/config'.
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/prisma ./node_modules/prisma
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/@prisma ./node_modules/@prisma
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/dotenv ./node_modules/dotenv
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/pg ./node_modules/pg
+
+# Also copy prisma.config.ts from builder
+COPY --from=builder --chown=nextjs:nodejs /app/prisma.config.ts ./prisma.config.ts
 
 # Persistent volume for local-storage mode (ignored when using MinIO)
 RUN mkdir -p /app/.upload && chown -R nextjs:nodejs /app/.upload
@@ -102,7 +104,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -fsS http://localhost:3000/api/health/ready || exit 1
 
 # Start: apply migrations THEN start Node.js server
-# Use npx --yes to run prisma (it's installed in node_modules but npm
-# install --no-save may not create .bin symlinks). HOME=/app is set so
-# npx can write its cache.
-CMD ["sh", "-c", "npx --yes prisma migrate deploy && node server.js"]
+# Use 'node node_modules/prisma/build/index.js' instead of npx to avoid
+# npm cache issues. This is the prisma CLI entry point.
+CMD ["sh", "-c", "node node_modules/prisma/build/index.js migrate deploy && node server.js"]

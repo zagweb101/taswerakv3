@@ -203,9 +203,8 @@ jobs:
             -e DIRECT_URL="$DIRECT_URL" \
             -e HOME=/app \
             --entrypoint sh \
-            -v "$PWD/prisma:/app/prisma:ro" \
             taswerak:ci \
-            -c "ls node_modules/.bin/ | grep prisma; npx --yes prisma migrate deploy"
+            -c "node node_modules/prisma/build/index.js migrate deploy"
 
       - name: Start Taswerak container
         env:
