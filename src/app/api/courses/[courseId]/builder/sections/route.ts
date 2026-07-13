@@ -1,8 +1,11 @@
 import { prisma } from "@/lib/prisma";
 import { NextResponse } from "next/server";
 
-export async function GET(request: Request, { params }: { params: { courseId: string } }) {
-  const { courseId } = params;
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ courseId: string }> }
+) {
+  const { courseId } = await params;
   const sections = await prisma.section.findMany({
     where: { courseId },
     orderBy: { order: "asc" },
@@ -11,9 +14,13 @@ export async function GET(request: Request, { params }: { params: { courseId: st
   return NextResponse.json(sections);
 }
 
-export async function POST(request: Request, { params }: { params: { courseId: string } }) {
-  const { courseId } = params;
-  const { title, titleAr, description } = await request.json();
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ courseId: string }> }
+) {
+  const { courseId } = await params;
+  const body = await request.json();
+  const { title, titleAr, description } = body;
   const maxOrder = await prisma.section.aggregate({
     where: { courseId },
     _max: { order: true },
@@ -30,8 +37,12 @@ export async function POST(request: Request, { params }: { params: { courseId: s
   return NextResponse.json(newSection, { status: 201 });
 }
 
-export async function PATCH(request: Request, { params }: { params: { courseId: string } }) {
-  const { id, title, titleAr, description, order } = await request.json();
+export async function PATCH(
+  request: Request,
+  { params }: { params: Promise<{ courseId: string }> }
+) {
+  const body = await request.json();
+  const { id, title, titleAr, description, order } = body;
   const updated = await prisma.section.update({
     where: { id },
     data: { title, titleAr, description, order },
@@ -39,7 +50,10 @@ export async function PATCH(request: Request, { params }: { params: { courseId: 
   return NextResponse.json(updated);
 }
 
-export async function DELETE(request: Request, { params }: { params: { courseId: string } }) {
+export async function DELETE(
+  request: Request,
+  { params }: { params: Promise<{ courseId: string }> }
+) {
   const { id } = await request.json();
   await prisma.section.delete({ where: { id } });
   return NextResponse.json({ success: true });

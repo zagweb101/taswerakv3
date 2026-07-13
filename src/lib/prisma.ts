@@ -1,16 +1,20 @@
-import { PrismaClient } from "@prisma/client";
+// ====================================================================
+// Taswerak — Prisma client (legacy shim)
+//
+// New code should import `db` from "@/lib/db" — that module uses the
+// @prisma/adapter-pg adapter which is required by Prisma 7's "client"
+// engine. This shim is kept only for backward compatibility with
+// routes that still import from "@/lib/prisma".
+// ====================================================================
 
-// Global for Prisma to prevent multiple instances in dev (hot reload)
+import { db } from "@/lib/db";
+
 declare global {
   // eslint-disable-next-line no-var
-  var prisma: PrismaClient | undefined;
+  var prisma: typeof db | undefined;
 }
 
-export const prisma =
-  global.prisma ||
-  new PrismaClient({
-    log: ["query"], // optional logging
-  });
+export const prisma = global.prisma || db;
 
 if (process.env.NODE_ENV !== "production") {
   // @ts-ignore

@@ -2,7 +2,11 @@ import { prisma } from "@/lib/prisma";
 import { NextResponse } from "next/server";
 
 // Get all lessons for a course (optionally filter by section)
-export async function GET(request: Request, { params }: { params: { courseId: string } }) {
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ courseId: string }> }
+) {
+  const { courseId } = await params;
   const { searchParams } = new URL(request.url);
   const sectionId = searchParams.get("sectionId");
   const whereClause: any = { courseId };
@@ -15,12 +19,15 @@ export async function GET(request: Request, { params }: { params: { courseId: st
 }
 
 // Create a new lesson within a section
-export async function POST(request: Request, { params }: { params: { courseId: string } }) {
-  const { courseId } = params;
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ courseId: string }> }
+) {
+  const { courseId } = await params;
+  const body = await request.json();
   const {
     sectionId,
     title,
-    titleAr,
     description,
     type = "VIDEO",
     videoUrl,
@@ -29,7 +36,7 @@ export async function POST(request: Request, { params }: { params: { courseId: s
     isPreview = false,
     isPublished = true,
     settings,
-  } = await request.json();
+  } = body;
   // Determine order within the section
   const maxOrder = await prisma.lesson.aggregate({
     where: { sectionId },
@@ -40,7 +47,6 @@ export async function POST(request: Request, { params }: { params: { courseId: s
       courseId,
       sectionId,
       title,
-      titleAr,
       description,
       type,
       videoUrl,
@@ -57,11 +63,14 @@ export async function POST(request: Request, { params }: { params: { courseId: s
 }
 
 // Update an existing lesson
-export async function PATCH(request: Request, { params }: { params: { courseId: string } }) {
+export async function PATCH(
+  request: Request,
+  { params }: { params: Promise<{ courseId: string }> }
+) {
+  const body = await request.json();
   const {
     id,
     title,
-    titleAr,
     description,
     type,
     videoUrl,
@@ -71,12 +80,11 @@ export async function PATCH(request: Request, { params }: { params: { courseId: 
     isPublished,
     order,
     settings,
-  } = await request.json();
+  } = body;
   const updated = await prisma.lesson.update({
     where: { id },
     data: {
       title,
-      titleAr,
       description,
       type,
       videoUrl,
@@ -92,7 +100,10 @@ export async function PATCH(request: Request, { params }: { params: { courseId: 
 }
 
 // Delete a lesson
-export async function DELETE(request: Request, { params }: { params: { courseId: string } }) {
+export async function DELETE(
+  request: Request,
+  { params }: { params: Promise<{ courseId: string }> }
+) {
   const { id } = await request.json();
   await prisma.lesson.delete({ where: { id } });
   return NextResponse.json({ success: true });
