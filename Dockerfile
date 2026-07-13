@@ -102,5 +102,9 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -fsS http://localhost:3000/api/health/ready || exit 1
 
-# Start: apply migrations THEN start Node.js server
-CMD ["sh", "-c", "npx prisma migrate deploy && node server.js"]
+# Start: assertEnvironment → apply migrations → start Node.js server
+# Environment validation runs FIRST so the process refuses to boot if
+# critical env vars are missing (AUTH_SECRET, DATABASE_URL, etc.).
+# SIGTERM is handled by Next.js standalone server.js (graceful shutdown)
+COPY --from=builder --chown=nextjs:nodejs /app/scripts/assert-env.js ./scripts/assert-env.js
+CMD ["sh", "-c", "node scripts/assert-env.js && npx prisma migrate deploy && node server.js"]

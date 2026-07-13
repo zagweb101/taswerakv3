@@ -18,6 +18,7 @@ import { auth } from "@/auth";
 import { db } from "@/lib/db";
 import {
   uploadSecure,
+  deleteSecure,
   StorageError,
   MAX_PRIVATE_RECEIPT_SIZE,
 } from "@/lib/services/storage";
@@ -91,6 +92,8 @@ export async function POST(req: NextRequest) {
         titleAr: true,
         title: true,
         price: true,
+        discountPrice: true,
+        isFree: true,
         currency: true,
         status: true,
         instructorId: true,
@@ -109,6 +112,31 @@ export async function POST(req: NextRequest) {
   if (course.status !== "PUBLISHED") {
     return NextResponse.json({ ok: false, error: "الدورة غير متاحة للتسجيل" }, { status: 400 });
   }
+
+  // ---------- Server-side expected amount calculation ----------
+  // Do NOT trust the student-submitted amount. Compute the expected
+  // amount from the course price (and any applicable discount) on the
+  // server. The student's submitted amount is recorded separately as
+  // `declaredTransferredAmount` for the instructor to compare against
+  // the expected amount during approval.
+  //
+  // For free courses, expected = 0 and any positive amount is rejected
+  // (a free course does not require a receipt).
+  const coursePrice = course.price ? Number(course.price) : 0;
+  const expectedAmount = coursePrice; // TODO: apply coupon/discount here
+
+  if (course.isFree || expectedAmount === 0) {
+    return NextResponse.json(
+      { ok: false, error: "هذه الدورة مجانية ولا تتطلب إيصال تحويل" },
+      { status: 400 }
+    );
+  }
+
+  // The student-declared amount is what they CLAIM they transferred.
+  // It does NOT have to match expectedAmount exactly (they might have
+  // made a mistake, or used a coupon), but the instructor will see
+  // both values side-by-side during approval.
+  const declaredTransferredAmount = amount;
 
   // Prevent duplicate enrollment
   const existing = await db.enrollment.findUnique({
@@ -178,10 +206,16 @@ export async function POST(req: NextRequest) {
           studentId: session.user.id,
           imageUrl,
           bankName,
-          amount,
+          // Store the SERVER-COMPUTED expected amount as the official
+          // receipt amount (NOT the student-declared amount). The
+          // student's declared amount is recorded in `notes` so the
+          // instructor can compare both values during approval.
+          amount: expectedAmount,
           currency: course.currency,
           referenceNumber: referenceNumber || null,
-          notes: notes || null,
+          notes: notes
+            ? `${notes}\n\n[expectedAmount=${expectedAmount} ${course.currency}, declaredTransferredAmount=${declaredTransferredAmount} ${course.currency}]`
+            : `[expectedAmount=${expectedAmount} ${course.currency}, declaredTransferredAmount=${declaredTransferredAmount} ${course.currency}]`,
           status: "PENDING",
         },
       });
@@ -197,7 +231,8 @@ export async function POST(req: NextRequest) {
       metadata: {
         courseId,
         courseName: course.titleAr || course.title,
-        amount,
+        expectedAmount,
+        declaredTransferredAmount,
         currency: course.currency,
         bankName,
         storageProvider: uploaded.provider,
@@ -216,25 +251,8 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     console.error("[payments/upload] DB transaction failed, deleting uploaded file:", err);
-    // Best-effort cleanup of the orphaned file
-    try {
-      const { readSecure } = await import("@/lib/services/storage");
-      // Attempt to delete via the same backend that wrote it
-      // (We don't expose a deleteSecure in the public API; for local fallback,
-      //  readSecure will throw NOT_FOUND if MinIO wrote it.)
-      await readSecure(uploaded.objectKey).then(async (r) => {
-        // For local files we can fs.unlink the path. For MinIO we leave it —
-        // the audit log will record the orphaned key.
-        if (r.provider === "local") {
-          const path = await import("path");
-          const fs = await import("fs/promises");
-          const localPath = path.join(process.cwd(), ".upload", uploaded.objectKey);
-          await fs.unlink(localPath).catch(() => {});
-        }
-      });
-    } catch {
-      // best-effort
-    }
+    // Clean up the orphaned file using deleteSecure (works for both MinIO and local)
+    await deleteSecure(uploaded.objectKey);
     return NextResponse.json(
       { ok: false, error: "فشل حفظ بيانات الإيصال. حاول مرة أخرى." },
       { status: 500 }

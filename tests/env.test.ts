@@ -207,3 +207,87 @@ describe("env: non-production is permissive", () => {
     expect(result.isProduction).toBe(false);
   });
 });
+
+// ====================================================================
+// Boot-time environment validation test
+// Simulates what scripts/assert-env.js does at container startup.
+// ====================================================================
+
+describe("env: boot-time validation (scripts/assert-env.js)", () => {
+  it("production process refuses to boot with missing AUTH_SECRET", () => {
+    const result = validateEnvironment({
+      NODE_ENV: "production",
+      AUTH_SECRET: undefined,
+      DATABASE_URL: "postgresql://user:strongpw@db:5432/app",
+      NEXTAUTH_URL: "https://app.example.com",
+      EMAIL_TRANSPORT: "smtp",
+      SMTP_HOST: "smtp.example.com",
+      SMTP_USER: "user",
+      SMTP_PASSWORD: "pass",
+      EMAIL_FROM: "no-reply@example.com",
+      PAYMENT_GATEWAY: "manual",
+      STORAGE_PROVIDER: "local",
+      LOCAL_STORAGE_DIR: "/app/.upload",
+    });
+    expect(result.ok).toBe(false);
+    expect(result.isProduction).toBe(true);
+    // assert-env.js would exit(1) here in production
+  });
+
+  it("production process refuses to boot with simulation email transport", () => {
+    const result = validateEnvironment({
+      NODE_ENV: "production",
+      AUTH_SECRET: "a".repeat(48),
+      DATABASE_URL: "postgresql://user:strongpw@db:5432/app",
+      NEXTAUTH_URL: "https://app.example.com",
+      EMAIL_TRANSPORT: "simulation",
+      STORAGE_PROVIDER: "local",
+      LOCAL_STORAGE_DIR: "/app/.upload",
+      PAYMENT_GATEWAY: "manual",
+    });
+    expect(result.ok).toBe(false);
+    // EMAIL_TRANSPORT=simulation is forbidden in production
+    expect(result.issues.find((i) => i.key === "EMAIL_TRANSPORT")).toBeDefined();
+  });
+
+  it("production process refuses to boot with ENABLE_DEMO_SEED=true", () => {
+    const result = validateEnvironment({
+      NODE_ENV: "production",
+      AUTH_SECRET: "a".repeat(48),
+      DATABASE_URL: "postgresql://user:strongpw@db:5432/app",
+      NEXTAUTH_URL: "https://app.example.com",
+      EMAIL_TRANSPORT: "smtp",
+      SMTP_HOST: "smtp.example.com",
+      SMTP_USER: "user",
+      SMTP_PASSWORD: "pass",
+      EMAIL_FROM: "no-reply@example.com",
+      PAYMENT_GATEWAY: "manual",
+      STORAGE_PROVIDER: "local",
+      LOCAL_STORAGE_DIR: "/app/.upload",
+      ENABLE_DEMO_SEED: "true",
+    });
+    expect(result.ok).toBe(false);
+    expect(result.issues.find((i) => i.key === "ENABLE_DEMO_SEED")).toBeDefined();
+  });
+
+  it("production process boots successfully with all env vars set", () => {
+    const result = validateEnvironment({
+      NODE_ENV: "production",
+      AUTH_SECRET: "a".repeat(48),
+      DATABASE_URL: "postgresql://user:strongpw@db:5432/app",
+      NEXTAUTH_URL: "https://app.example.com",
+      EMAIL_TRANSPORT: "smtp",
+      SMTP_HOST: "smtp.example.com",
+      SMTP_USER: "user",
+      SMTP_PASSWORD: "pass",
+      EMAIL_FROM: "no-reply@example.com",
+      PAYMENT_GATEWAY: "manual",
+      STORAGE_PROVIDER: "minio",
+      MINIO_ENDPOINT: "http://minio:9000",
+      MINIO_ACCESS_KEY: "key",
+      MINIO_SECRET_KEY: "secret",
+    });
+    expect(result.ok).toBe(true);
+    expect(result.isProduction).toBe(true);
+  });
+});

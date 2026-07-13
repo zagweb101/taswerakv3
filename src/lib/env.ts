@@ -168,13 +168,9 @@ export function validateEnvironment(env: NodeJS.ProcessEnv = process.env): EnvRe
       message: "Moyasar webhook secret not set — webhooks cannot be verified (fail-closed).",
     });
   }
-  if (gateway === "tap" && !env.TAP_WEBHOOK_SECRET && isProd) {
-    issues.push({
-      level: "warn",
-      key: "TAP_WEBHOOK_SECRET",
-      message: "Tap webhook secret not set — webhooks cannot be verified (fail-closed).",
-    });
-  }
+  // Note: Tap does NOT use a separate webhook secret. The TAP_SECRET_KEY
+  // (used for API auth) is also used to sign webhooks via the hashstring
+  // method. No TAP_WEBHOOK_SECRET env var is needed or documented by Tap.
 
   // ---------- Storage ----------
   const storageProvider = (env.STORAGE_PROVIDER || (env.MINIO_ACCESS_KEY ? "minio" : "local")).toLowerCase();

@@ -18,6 +18,7 @@ import { auth } from "@/auth";
 import { db } from "@/lib/db";
 import {
   uploadSecure,
+  deleteSecure,
   StorageError,
   MAX_PRIVATE_SUBMISSION_SIZE,
 } from "@/lib/services/storage";
@@ -208,15 +209,8 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     console.error("[submissions/upload] DB transaction failed, deleting uploaded file:", err);
-    // best-effort cleanup of orphaned file (local only)
-    try {
-      const path = await import("path");
-      const fs = await import("fs/promises");
-      const localPath = path.join(process.cwd(), ".upload", uploaded.objectKey);
-      await fs.unlink(localPath).catch(() => {});
-    } catch {
-      // best-effort
-    }
+    // Clean up the orphaned file using deleteSecure (works for both MinIO and local)
+    await deleteSecure(uploaded.objectKey);
     return NextResponse.json(
       { ok: false, error: "فشل حفظ التسليم. حاول مرة أخرى." },
       { status: 500 }

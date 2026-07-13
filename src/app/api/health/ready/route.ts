@@ -6,7 +6,9 @@
 // Checks:
 //   1. Database (SELECT 1)
 //   2. AUTH_SECRET (or NEXTAUTH_SECRET) configured + strong enough
-//   3. Storage configuration (MinIO creds present OR local dir writable)
+//   3. Storage: if STORAGE_PROVIDER=minio, pings MinIO AND verifies
+//      the bucket exists (not just credentials). If local, verifies
+//      the dir is writable.
 //   4. Environment validation passes (no errors)
 //
 // Returns 503 if any check fails. Never exposes secret values.
@@ -15,7 +17,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getEnvironmentSummary } from "@/lib/env";
-import { storageStatus } from "@/lib/services/storage";
+import { checkStorageReadiness } from "@/lib/services/storage";
 import { promises as fs } from "fs";
 import path from "path";
 
@@ -56,31 +58,16 @@ function checkAuthSecret(): Check {
 }
 
 async function checkStorage(): Promise<Check> {
-  // If MinIO is configured, just verify creds are present (don't ping —
-  // MinIO may be temporarily down without affecting the whole app since
-  // we fall back to local). If local, verify the dir is writable.
-  const provider = storageStatus.provider;
-  if (provider === "minio") {
-    if (!process.env.MINIO_ACCESS_KEY || !process.env.MINIO_SECRET_KEY) {
-      return { name: "storage", ok: false, error: "MinIO selected but creds missing" };
-    }
-    return { name: "storage", ok: true };
-  }
-  // local — verify dir is writable
-  try {
-    const dir = storageStatus.localStorageDir;
-    await fs.mkdir(dir, { recursive: true });
-    const probe = path.join(dir, ".ready-probe");
-    await fs.writeFile(probe, "ok");
-    await fs.unlink(probe);
-    return { name: "storage", ok: true };
-  } catch (err: any) {
-    return {
-      name: "storage",
-      ok: false,
-      error: (err?.message || "Storage dir not writable").slice(0, 120),
-    };
-  }
+  // Use the new checkStorageReadiness() which:
+  //   - STORAGE_PROVIDER=minio: pings MinIO + verifies bucket exists
+  //   - STORAGE_PROVIDER=local: verifies local dir is writable
+  //   - STORAGE_PROVIDER=auto: pings MinIO if creds present, else local
+  const result = await checkStorageReadiness();
+  return {
+    name: "storage",
+    ok: result.ok,
+    error: result.ok ? undefined : result.error,
+  };
 }
 
 export async function GET() {

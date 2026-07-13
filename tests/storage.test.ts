@@ -203,3 +203,60 @@ describe("storage: StorageError", () => {
     expect(e instanceof Error).toBe(true);
   });
 });
+
+// ====================================================================
+// deleteSecure + storage policy tests
+// ====================================================================
+
+import { deleteSecure, readPublicSecure } from "@/lib/services/storage";
+import { promises as fs, existsSync } from "fs";
+import path from "path";
+
+describe("storage: deleteSecure (local mode)", () => {
+  const tmpDir = path.join(process.cwd(), ".upload", "test-delete");
+
+  it("deletes a local file that exists", async () => {
+    // Create a test file
+    const objectKey = "public/test-delete-file-" + Date.now() + ".txt";
+    const localPath = path.join(process.cwd(), ".upload", objectKey);
+    await fs.mkdir(path.dirname(localPath), { recursive: true });
+    await fs.writeFile(localPath, "test content");
+
+    // Verify it exists
+    expect(existsSync(localPath)).toBe(true);
+
+    // Delete it
+    await deleteSecure(objectKey);
+
+    // Verify it's gone
+    expect(existsSync(localPath)).toBe(false);
+  });
+
+  it("does NOT throw when deleting a non-existent file (cleanup use case)", async () => {
+    const objectKey = "public/nonexistent-" + Date.now() + ".txt";
+    // Should not throw
+    await expect(deleteSecure(objectKey)).resolves.not.toThrow();
+  });
+
+  it("rejects unsafe paths (path traversal)", async () => {
+    // Should not throw but should log a warning and skip
+    await expect(deleteSecure("../etc/passwd")).resolves.not.toThrow();
+  });
+});
+
+describe("storage: readPublicSecure", () => {
+  it("rejects private-prefixed keys", async () => {
+    await expect(
+      readPublicSecure("private/receipts/2026/01/test.jpg")
+    ).rejects.toThrow(StorageError);
+  });
+
+  it("accepts public-prefixed keys (validation only, no actual read)", () => {
+    // Just verify the function accepts public prefixes by checking
+    // it doesn't throw StorageError with NOT_PUBLIC
+    // (it will throw NOT_FOUND since the file doesn't exist)
+    return expect(
+      readPublicSecure("public/nonexistent-" + Date.now() + ".jpg")
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});

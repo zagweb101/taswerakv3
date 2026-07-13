@@ -5,11 +5,17 @@
 // Production-readiness rules:
 //   - FAIL CLOSED: if TAP_SECRET_KEY is not configured, return 200
 //     but do NOT update any payment.
+//   - Verify the Tap webhook signature using the OFFICIAL hashstring
+//     method (NOT the raw JSON body). The hashstring is built from:
+//       x_id, x_amount, x_currency, x_gateway_reference,
+//       x_payment_reference, x_status, x_created
+//     joined by "x", and signed with HMAC-SHA256 using TAP_SECRET_KEY
+//     (the same key used for API auth — there is NO separate webhook
+//     secret in Tap's model).
+//   - The signature is sent in the `hashstring` HTTP header.
 //   - Refetch the charge from Tap API; do not trust `status` alone.
 //   - Verify id, amount, currency, status, userId, courseId.
 //   - Idempotent: if payment.status === PAID, return without re-processing.
-//   - Reject replay: Tap webhook signature (x-callback-signature HMAC-SHA512)
-//     must match if a secret is configured.
 //   - Never activate enrollment on amount/currency mismatch.
 // ====================================================================
 
@@ -56,7 +62,7 @@ export async function POST(req: NextRequest) {
   }
   const secretKey = process.env.TAP_SECRET_KEY!;
 
-  // ---------- Read raw body for HMAC ----------
+  // ---------- Read raw body ----------
   const rawBody = await req.text();
   let payload: any;
   try {
@@ -65,12 +71,15 @@ export async function POST(req: NextRequest) {
     return bailFail("Invalid JSON");
   }
 
-  // ---------- Signature verification ----------
-  const sigHeader =
-    req.headers.get("x-callback-signature") ||
-    req.headers.get("tap-header") ||
+  // ---------- Signature verification (official Tap hashstring method) ----------
+  // Tap sends the signature in the `hashstring` header.
+  // It is HMAC-SHA256 of the hashstring built from charge fields,
+  // signed with TAP_SECRET_KEY (the API secret, NOT a separate webhook secret).
+  const hashstringHeader =
+    req.headers.get("hashstring") ||
+    req.headers.get("x-callback-signature") || // legacy fallback
     undefined;
-  if (!verifyTapWebhook(rawBody, sigHeader, process.env.TAP_WEBHOOK_SECRET)) {
+  if (!verifyTapWebhook(payload, hashstringHeader, secretKey)) {
     console.warn("[tap/callback] signature verification failed");
     await writeAudit({
       action: "WEBHOOK_REJECTED_SIGNATURE",

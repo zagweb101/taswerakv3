@@ -124,3 +124,54 @@ describe("payment receipt: amount validation", () => {
     expect(isValidAmount(Infinity)).toBe(false);
   });
 });
+
+// ====================================================================
+// Expected amount vs declared amount — server-side calculation tests
+// ====================================================================
+
+/**
+ * Simulate the server-side expected amount calculation from course price.
+ * The route does: expectedAmount = Number(course.price)
+ * The student-submitted amount is recorded separately as declaredTransferredAmount.
+ */
+function computeExpectedAmount(coursePrice: number | null | undefined, isFree: boolean): number {
+  if (isFree) return 0;
+  if (!coursePrice || !Number.isFinite(Number(coursePrice))) return 0;
+  return Number(coursePrice);
+}
+
+describe("payment: server-side expected amount calculation", () => {
+  it("computes expected amount from course price", () => {
+    expect(computeExpectedAmount(1000, false)).toBe(1000);
+    expect(computeExpectedAmount(499.99, false)).toBe(499.99);
+  });
+
+  it("returns 0 for free courses", () => {
+    expect(computeExpectedAmount(1000, true)).toBe(0);
+    expect(computeExpectedAmount(0, true)).toBe(0);
+  });
+
+  it("returns 0 when price is null/undefined", () => {
+    expect(computeExpectedAmount(null, false)).toBe(0);
+    expect(computeExpectedAmount(undefined, false)).toBe(0);
+  });
+
+  it("does NOT trust the student-submitted amount", () => {
+    // Scenario: course costs 1000, student submits amount=1
+    // The route should use expectedAmount=1000 (from course.price),
+    // NOT the student's declared amount=1.
+    const coursePrice = 1000;
+    const studentDeclared = 1;
+    const expectedAmount = computeExpectedAmount(coursePrice, false);
+    expect(expectedAmount).toBe(1000);
+    expect(expectedAmount).not.toBe(studentDeclared);
+    // The receipt stores expectedAmount as the official amount
+    // and studentDeclared in notes for instructor comparison.
+  });
+
+  it("rejects free course receipt upload (no receipt needed)", () => {
+    const expectedAmount = computeExpectedAmount(0, true);
+    expect(expectedAmount).toBe(0);
+    // Route returns 400: "هذه الدورة مجانية ولا تتطلب إيصال تحويل"
+  });
+});

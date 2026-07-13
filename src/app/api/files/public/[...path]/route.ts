@@ -1,16 +1,16 @@
 // ====================================================================
 // GET /api/files/public/[...path]
-// Serves a public asset (course thumbnail, logo, etc.) from local
-// fallback storage. MinIO public assets are served directly via
-// MINIO_PUBLIC_URL and never hit this route.
+// Serves a public asset (course thumbnail, logo, etc.) from MinIO OR
+// local storage, depending on the configured provider.
 //
 // Path traversal is blocked. Only public/ prefixed keys are allowed.
+// The MinIO bucket stays PRIVATE — files are read via the MinIO API
+// (signed internally) and streamed through this route, never exposed
+// directly via a public MinIO URL.
 // ====================================================================
 
 import { NextRequest, NextResponse } from "next/server";
-import { promises as fs } from "fs";
-import path from "path";
-import { isSafePath, detectMime, safeLocalPath } from "@/lib/services/storage";
+import { readPublicSecure, StorageError } from "@/lib/services/storage";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -22,11 +22,8 @@ export async function GET(
   const { path: parts } = await params;
   const objectKey = parts.map(decodeURIComponent).join("/");
 
-  if (!isSafePath(objectKey)) {
-    return new NextResponse("Forbidden", { status: 403 });
-  }
-
-  // Public prefixes only
+  // Public prefixes only — readPublicSecure also enforces this, but
+  // we check here too so we can return 403 before touching storage.
   const isPublic =
     objectKey.startsWith("public/") ||
     objectKey.startsWith("courses/thumbnails/") ||
@@ -35,27 +32,28 @@ export async function GET(
     return new NextResponse("Forbidden", { status: 403 });
   }
 
-  const localPath = safeLocalPath(objectKey);
-  if (!localPath) {
-    return new NextResponse("Forbidden", { status: 403 });
-  }
-
-  let buffer: Buffer;
   try {
-    buffer = await fs.readFile(localPath);
-  } catch {
-    return new NextResponse("Not found", { status: 404 });
+    const result = await readPublicSecure(objectKey);
+    return new NextResponse(new Uint8Array(result.buffer), {
+      status: 200,
+      headers: {
+        "Content-Type": result.mime,
+        "Content-Length": String(result.size),
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
+  } catch (err) {
+    if (err instanceof StorageError) {
+      if (err.code === "NOT_FOUND") return new NextResponse("Not found", { status: 404 });
+      if (err.code === "PATH_UNSAFE" || err.code === "NOT_PUBLIC") {
+        return new NextResponse("Forbidden", { status: 403 });
+      }
+      if (err.code === "MINIO_READ_FAILED") {
+        return new NextResponse("Storage unavailable", { status: 503 });
+      }
+    }
+    console.error("[files/public] error:", err);
+    return new NextResponse("Internal Server Error", { status: 500 });
   }
-
-  const mime = detectMime(buffer) || "application/octet-stream";
-
-  return new NextResponse(new Uint8Array(buffer), {
-    status: 200,
-    headers: {
-      "Content-Type": mime,
-      "Content-Length": String(buffer.length),
-      "Cache-Control": "public, max-age=31536000, immutable",
-      "X-Content-Type-Options": "nosniff",
-    },
-  });
 }

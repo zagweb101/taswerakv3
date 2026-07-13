@@ -229,12 +229,38 @@ function getMinioClient(): Client | null {
   }
 }
 
+/**
+ * Determine the effective storage provider.
+ *
+ * - "minio": STORAGE_PROVIDER=minio → MUST use MinIO. If MinIO is
+ *   unreachable, uploads FAIL (no local fallback). This is the
+ *   production-safe mode — data must go to MinIO or nowhere.
+ *
+ * - "local": STORAGE_PROVIDER=local → always use the local filesystem.
+ *
+ * - "auto" (default): STORAGE_PROVIDER=auto → use MinIO if credentials
+ *   are present and the client initializes, else fall back to local
+ *   WITH a console warning. Suitable for dev/staging.
+ */
 function usingMinio(): boolean {
   if (STORAGE_PROVIDER === "local") return false;
   if (STORAGE_PROVIDER === "minio") return true;
-  // auto
-  return !!getMinioClient();
+  // auto — fall back to local if MinIO creds are missing
+  const c = getMinioClient();
+  if (!c && STORAGE_PROVIDER === "auto") {
+    // Only warn once per process
+    if (!autoFallbackWarned) {
+      console.warn(
+        "[storage] STORAGE_PROVIDER=auto but MinIO credentials are missing — falling back to local storage. " +
+          "Set STORAGE_PROVIDER=minio in production to fail-closed instead."
+      );
+      autoFallbackWarned = true;
+    }
+  }
+  return !!c;
 }
+
+let autoFallbackWarned = false;
 
 async function ensureBucketPrivate(): Promise<void> {
   const c = getMinioClient();
@@ -327,29 +353,49 @@ export async function uploadSecure(opts: UploadOptions): Promise<UploadResult> {
   const objectKey = makeSecureObjectKey(folder, originalFilename, visibility);
 
   // 6. Persist
+  //
+  // Fail-closed policy:
+  //   - STORAGE_PROVIDER=minio → MUST use MinIO. If MinIO fails, throw
+  //     (no local fallback). The bucket stays PRIVATE.
+  //   - STORAGE_PROVIDER=auto → try MinIO first; if it fails, fall back
+  //     to local WITH a warning (already logged in usingMinio()).
+  //   - STORAGE_PROVIDER=local → always local.
+  //
+  // Public URL policy:
+  //   - For public files, ALWAYS return /api/files/public/{objectKey}
+  //     (never a direct MinIO URL). This keeps the bucket private and
+  //     routes all reads through our /api/files/public endpoint which
+  //     can serve from either MinIO or local transparently.
   if (usingMinio()) {
     try {
       await ensureBucketPrivate();
       const c = getMinioClient()!;
       await c.putObject(bucket, objectKey, buffer, buffer.length, {
         "Content-Type": realMime,
-        // Mark private files with a metadata flag (for audit / future tooling)
         "x-amz-meta-visibility": visibility,
       });
       return {
         objectKey,
-        publicUrl: visibility === "public" ? `${publicUrl}/${bucket}/${objectKey}` : null,
+        publicUrl: visibility === "public" ? `/api/files/public/${objectKey}` : null,
         provider: "minio",
         mime: realMime,
         size: buffer.length,
       };
     } catch (err) {
-      console.warn("[storage] minio upload failed, falling back to local:", err);
-      // fall through to local
+      // If STORAGE_PROVIDER=minio, FAIL CLOSED — do not fall back to local.
+      if (STORAGE_PROVIDER === "minio") {
+        console.error("[storage] MinIO upload failed (fail-closed mode):", err);
+        throw new StorageError(
+          "MINIO_UPLOAD_FAILED",
+          `MinIO upload failed and STORAGE_PROVIDER=minio — refusing to fall back to local. Error: ${(err as Error).message}`
+        );
+      }
+      // auto mode — fall back to local with warning
+      console.warn("[storage] MinIO upload failed, falling back to local (auto mode):", err);
     }
   }
 
-  // Local fallback
+  // Local storage (or auto fallback)
   const localPath = safeLocalPath(objectKey);
   if (!localPath) {
     throw new StorageError("PATH_UNSAFE", `Resolved object key is unsafe: ${objectKey}`);
@@ -409,7 +455,14 @@ export async function readSecure(objectKey: string): Promise<ReadResult> {
         provider: "minio",
       };
     } catch (err) {
-      console.warn("[storage] minio read failed, falling back to local:", err);
+      // If STORAGE_PROVIDER=minio, FAIL CLOSED — do not fall back to local.
+      if (STORAGE_PROVIDER === "minio") {
+        throw new StorageError(
+          "MINIO_READ_FAILED",
+          `MinIO read failed and STORAGE_PROVIDER=minio — refusing to fall back to local. Error: ${(err as Error).message}`
+        );
+      }
+      console.warn("[storage] MinIO read failed, falling back to local (auto mode):", err);
     }
   }
 
@@ -430,6 +483,118 @@ export async function readSecure(objectKey: string): Promise<ReadResult> {
   }
 }
 
+// ---------- Read PUBLIC files (for /api/files/public/[...path]) ----------
+/**
+ * Read a public file by its object key.
+ * Unlike readSecure, this accepts public-prefixed keys.
+ * Reads from MinIO or local depending on the provider (fail-closed for minio).
+ */
+export async function readPublicSecure(objectKey: string): Promise<ReadResult> {
+  if (!isSafePath(objectKey)) {
+    throw new StorageError("PATH_UNSAFE", `Object key is unsafe: ${objectKey}`);
+  }
+  // Must be a public prefix
+  const isPublic =
+    objectKey.startsWith("public/") ||
+    objectKey.startsWith("courses/thumbnails/") ||
+    objectKey.startsWith("courses/preview/");
+  if (!isPublic) {
+    throw new StorageError(
+      "NOT_PUBLIC",
+      `readPublicSecure may only be called for public prefixes; got ${objectKey}`
+    );
+  }
+
+  if (usingMinio()) {
+    try {
+      const c = getMinioClient()!;
+      const stream = await c.getObject(bucket, objectKey);
+      const chunks: Buffer[] = [];
+      for await (const chunk of stream) {
+        chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : (chunk as Buffer));
+      }
+      const buffer = Buffer.concat(chunks);
+      const stat = await c.statObject(bucket, objectKey);
+      return {
+        buffer,
+        mime: stat.metaData["content-type"] || detectMime(buffer) || "application/octet-stream",
+        size: buffer.length,
+        provider: "minio",
+      };
+    } catch (err) {
+      if (STORAGE_PROVIDER === "minio") {
+        throw new StorageError(
+          "MINIO_READ_FAILED",
+          `MinIO read failed and STORAGE_PROVIDER=minio — refusing to fall back to local. Error: ${(err as Error).message}`
+        );
+      }
+      console.warn("[storage] MinIO public read failed, falling back to local (auto mode):", err);
+    }
+  }
+
+  const localPath = safeLocalPath(objectKey);
+  if (!localPath) {
+    throw new StorageError("PATH_UNSAFE", `Object key is unsafe: ${objectKey}`);
+  }
+  try {
+    const buffer = await fs.readFile(localPath);
+    return {
+      buffer,
+      mime: detectMime(buffer) || "application/octet-stream",
+      size: buffer.length,
+      provider: "local",
+    };
+  } catch {
+    throw new StorageError("NOT_FOUND", `File not found: ${objectKey}`);
+  }
+}
+
+// ---------- Delete (for cleanup on DB transaction failure) ----------
+/**
+ * Delete a file by its object key.
+ * Tries MinIO first (removeObject), then local filesystem.
+ * Used to clean up orphaned files when a DB transaction fails after
+ * an upload has already written the file.
+ *
+ * Best-effort: logs errors but does NOT throw (so it can be used in
+ * catch blocks without masking the original error).
+ */
+export async function deleteSecure(objectKey: string): Promise<void> {
+  if (!isSafePath(objectKey)) {
+    console.warn("[storage] deleteSecure: unsafe path, skipping:", objectKey);
+    return;
+  }
+
+  if (usingMinio()) {
+    try {
+      const c = getMinioClient()!;
+      await c.removeObject(bucket, objectKey);
+      return;
+    } catch (err) {
+      // If MinIO delete fails, also try local (the file might have been
+      // written there during an auto-mode fallback before the transaction
+      // failed).
+      console.warn("[storage] MinIO delete failed, trying local:", err);
+    }
+  }
+
+  // Local delete (or auto-fallback cleanup)
+  const localPath = safeLocalPath(objectKey);
+  if (!localPath) {
+    console.warn("[storage] deleteSecure: unsafe local path, skipping:", objectKey);
+    return;
+  }
+  try {
+    await fs.unlink(localPath);
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      // File doesn't exist — that's fine for cleanup
+      return;
+    }
+    console.warn("[storage] local delete failed:", err);
+  }
+}
+
 // ---------- Typed error ----------
 export class StorageError extends Error {
   code: string;
@@ -443,7 +608,94 @@ export class StorageError extends Error {
 // ---------- Public introspection ----------
 export const storageStatus = {
   provider: usingMinio() ? "minio" : "local",
+  storageProviderEnv: STORAGE_PROVIDER,
   bucket,
   publicUrl,
   localStorageDir,
 };
+
+/**
+ * Check storage readiness for the /api/health/ready endpoint.
+ *
+ * - If STORAGE_PROVIDER=minio: pings MinIO and verifies the bucket
+ *   exists. Returns down if MinIO is unreachable or the bucket is
+ *   missing.
+ * - If STORAGE_PROVIDER=local: verifies the local storage dir is
+ *   writable.
+ * - If STORAGE_PROVIDER=auto: if MinIO creds are present, pings MinIO
+ *   (bucket existence); otherwise checks local dir writability.
+ */
+export async function checkStorageReadiness(): Promise<{
+  ok: boolean;
+  provider: string;
+  error?: string;
+}> {
+  // Local mode — just check the dir is writable
+  if (STORAGE_PROVIDER === "local") {
+    try {
+      await fs.mkdir(localStorageDir, { recursive: true });
+      const probe = path.join(localStorageDir, ".ready-probe");
+      await fs.writeFile(probe, "ok");
+      await fs.unlink(probe);
+      return { ok: true, provider: "local" };
+    } catch (err: any) {
+      return {
+        ok: false,
+        provider: "local",
+        error: (err?.message || "Local storage dir not writable").slice(0, 120),
+      };
+    }
+  }
+
+  // minio or auto — ping MinIO and verify bucket exists
+  const c = getMinioClient();
+  if (!c) {
+    if (STORAGE_PROVIDER === "minio") {
+      return {
+        ok: false,
+        provider: "minio",
+        error: "MinIO credentials missing (STORAGE_PROVIDER=minio requires MINIO_ACCESS_KEY + MINIO_SECRET_KEY)",
+      };
+    }
+    // auto — fall back to local check
+    return checkStorageReadinessLocal();
+  }
+
+  try {
+    const exists = await c.bucketExists(bucket);
+    if (!exists) {
+      return {
+        ok: false,
+        provider: "minio",
+        error: `Bucket '${bucket}' does not exist on MinIO`,
+      };
+    }
+    return { ok: true, provider: "minio" };
+  } catch (err: any) {
+    return {
+      ok: false,
+      provider: "minio",
+      error: (err?.message || "MinIO unreachable").slice(0, 120),
+    };
+  }
+}
+
+async function checkStorageReadinessLocal(): Promise<{
+  ok: boolean;
+  provider: string;
+  error?: string;
+}> {
+  try {
+    await fs.mkdir(localStorageDir, { recursive: true });
+    const probe = path.join(localStorageDir, ".ready-probe");
+    await fs.writeFile(probe, "ok");
+    await fs.unlink(probe);
+    return { ok: true, provider: "local" };
+  } catch (err: any) {
+    return {
+      ok: false,
+      provider: "local",
+      error: (err?.message || "Local storage dir not writable").slice(0, 120),
+    };
+  }
+}
