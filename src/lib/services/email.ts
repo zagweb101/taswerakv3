@@ -1,8 +1,14 @@
 // ====================================================================
-// Taswerak — Email service
-// Mode: "simulation" (default in dev) | "smtp" (production)
-// In simulation mode, emails are logged to console + saved to a file
-// under .upload/_emails/ for easy review.
+// Taswerak — Email service (production-ready)
+//
+// Rules:
+//   - simulation mode is allowed ONLY in development / staging.
+//   - In production, SMTP must be configured. If SMTP fails, return
+//     { ok: false, mode: "smtp", error: "<redacted>" } — do NOT silently
+//     fall back to simulation.
+//   - Never log the SMTP password. Errors are logged with the password
+//     field stripped.
+//   - Result shape: { ok: boolean; mode: "simulation" | "smtp"; error?: string }
 // ====================================================================
 
 import { promises as fs } from "fs";
@@ -10,8 +16,36 @@ import path from "path";
 
 type Transport = "simulation" | "smtp";
 
-const transport: Transport = (process.env.EMAIL_TRANSPORT as Transport) || "simulation";
-const fromAddress = process.env.EMAIL_FROM || "Taswerak <no-reply@taswerak.com>";
+// Read env at CALL time so tests + hot-reloads see fresh values.
+function isProductionEnv(): boolean {
+  return process.env.NODE_ENV === "production";
+}
+
+function isStagingEnv(): boolean {
+  return (process.env.NODE_ENV || "").toLowerCase() === "staging";
+}
+
+function simulationAllowed(): boolean {
+  return !isProductionEnv(); // dev or staging
+}
+
+function getTransport(): Transport {
+  const isProd = isProductionEnv();
+  const t = (process.env.EMAIL_TRANSPORT || (isProd ? "smtp" : "simulation")).toLowerCase();
+  if (t === "smtp") return "smtp";
+  if (t === "simulation") {
+    if (!simulationAllowed()) {
+      // Force smtp in production even if someone misconfigures env
+      return "smtp";
+    }
+    return "simulation";
+  }
+  return isProd ? "smtp" : "simulation";
+}
+
+function fromAddress(): string {
+  return process.env.EMAIL_FROM || "Taswerak <no-reply@taswerak.com>";
+}
 
 function escapeHtml(str: string): string {
   return str
@@ -39,36 +73,62 @@ export type EmailTemplate =
   | "WELCOME"
   | "PASSWORD_RESET";
 
+export interface EmailResult {
+  ok: boolean;
+  mode: Transport;
+  error?: string;
+}
+
 /**
- * Send an email using the configured transport.
- * In simulation mode, the email is logged + saved to disk for review.
+ * Validate SMTP env is configured. Returns a structured error if not.
  */
-export async function sendEmail(payload: EmailPayload): Promise<{ ok: boolean; mode: Transport }> {
+export function validateSmtpConfig(): EmailResult {
+  const transport = getTransport();
+  if (transport === "simulation") {
+    return { ok: true, mode: "simulation" };
+  }
+  const missing = ["SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "EMAIL_FROM"].filter(
+    (k) => !process.env[k]
+  );
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      mode: "smtp",
+      error: `SMTP not configured — missing: ${missing.join(", ")}`,
+    };
+  }
+  return { ok: true, mode: "smtp" };
+}
+
+/**
+ * Send an email. Always returns a structured result.
+ */
+export async function sendEmail(payload: EmailPayload): Promise<EmailResult> {
+  const transport = getTransport();
+
   if (transport === "simulation") {
     return simulateEmail(payload);
   }
-
   return smtpEmail(payload);
 }
 
-async function simulateEmail(payload: EmailPayload): Promise<{ ok: boolean; mode: Transport }> {
+async function simulateEmail(payload: EmailPayload): Promise<EmailResult> {
   const { to, subject, html, text, templateId, data } = payload;
   const stamp = new Date().toISOString();
-  const summary = `[${stamp}] TO: ${to}\nSUBJECT: ${subject}\nTEMPLATE: ${templateId}\nDATA: ${JSON.stringify(data)}\n----\n${text || "(no plain text body)"}\n================\n`;
+  const summary = `[${stamp}] TO: ${to}\nSUBJECT: ${subject}\nTEMPLATE: ${templateId}\nDATA: ${JSON.stringify(
+    data
+  )}\n----\n${text || "(no plain text body)"}\n================\n`;
 
   console.log("━━━━━━━━━━━━━━ EMAIL (simulation) ━━━━━━━━━━━━━━");
   console.log(summary);
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-  // Persist to disk so admin can review in dev
+  // Persist to disk in dev so admin can review
   try {
     const dir = path.join(process.cwd(), ".upload", "_emails");
     await fs.mkdir(dir, { recursive: true });
     const safeFile = `${stamp.replace(/[:.]/g, "-")}_${templateId}.log`;
-    await fs.writeFile(
-      path.join(dir, safeFile),
-      `${summary}\n\nHTML:\n${html}\n`
-    );
+    await fs.writeFile(path.join(dir, safeFile), `${summary}\n\nHTML:\n${html}\n`);
   } catch (err) {
     console.warn("[email] could not persist simulation log:", err);
   }
@@ -76,15 +136,26 @@ async function simulateEmail(payload: EmailPayload): Promise<{ ok: boolean; mode
   return { ok: true, mode: "simulation" };
 }
 
-// Singleton SMTP transporter — reused across all email sends
+// Singleton SMTP transporter
 let globalTransporter: any = null;
 
-async function smtpEmail(payload: EmailPayload): Promise<{ ok: boolean; mode: Transport }> {
-  try {
-    // Lazy import so the dependency only loads when needed
-    const nodemailer = await import("nodemailer");
+async function smtpEmail(payload: EmailPayload): Promise<EmailResult> {
+  const isProd = isProductionEnv();
+  const cfg = validateSmtpConfig();
+  if (!cfg.ok) {
+    // SMTP not configured
+    if (isProd) {
+      // In production we MUST NOT silently fall back to simulation.
+      console.error("[email] SMTP not configured — refusing to send in production");
+      return { ok: false, mode: "smtp", error: cfg.error };
+    }
+    // In dev/staging, fall back to simulation with a loud warning
+    console.warn("[email] SMTP not configured — falling back to simulation in non-production");
+    return simulateEmail(payload);
+  }
 
-    // Reuse transporter (singleton) instead of creating per-send
+  try {
+    const nodemailer = await import("nodemailer");
     if (!globalTransporter) {
       globalTransporter = nodemailer.createTransport({
         host: process.env.SMTP_HOST,
@@ -98,7 +169,7 @@ async function smtpEmail(payload: EmailPayload): Promise<{ ok: boolean; mode: Tr
     }
 
     await globalTransporter.sendMail({
-      from: fromAddress,
+      from: fromAddress(),
       to: payload.to,
       subject: payload.subject,
       html: payload.html,
@@ -106,17 +177,24 @@ async function smtpEmail(payload: EmailPayload): Promise<{ ok: boolean; mode: Tr
     });
 
     return { ok: true, mode: "smtp" };
-  } catch (err) {
-    console.error("[email] SMTP failed:", err);
-    // Reset transporter on failure so it's re-created next time
-    globalTransporter = null;
-    // Fall back to simulation so we don't lose the email
+  } catch (err: any) {
+    // Strip credentials from error before logging
+    const safeMessage = (err?.message || "SMTP error")
+      .replace(/(password|pass|secret|key|auth)[^\s]*/gi, "$1=***");
+    console.error("[email] SMTP failed:", safeMessage);
+    globalTransporter = null; // recreate on next attempt
+    if (isProd) {
+      // DO NOT fall back to simulation in production
+      return { ok: false, mode: "smtp", error: safeMessage };
+    }
+    // Non-production: fall back to simulation so devs can still see the email
+    console.warn("[email] Falling back to simulation in non-production");
     return simulateEmail(payload);
   }
 }
 
 // ====================================================================
-// Templates
+// Templates (unchanged from previous version)
 // ====================================================================
 
 export function renderPaymentApprovedEmail(opts: {
@@ -127,7 +205,7 @@ export function renderPaymentApprovedEmail(opts: {
 }): EmailPayload {
   const { studentName, courseName, amount, currency } = opts;
   return {
-    to: "", // filled by caller
+    to: "",
     subject: `تم اعتماد دفعتك — ${courseName} | تصويرك`,
     templateId: "PAYMENT_APPROVED",
     data: opts,
