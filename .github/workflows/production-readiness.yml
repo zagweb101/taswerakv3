@@ -212,7 +212,10 @@ jobs:
           DIRECT_URL: "postgresql://taswerak:taswerak_ci_pw@localhost:5432/taswerak_ci?schema=public"
           AUTH_SECRET: "ci-smoke-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
           NEXTAUTH_URL: "http://localhost:3000"
-          NODE_ENV: "production"
+          # Use 'staging' so EMAIL_TRANSPORT=simulation is allowed.
+          # In production, simulation is forbidden and would make
+          # /api/health/ready return 503 (env validation failure).
+          NODE_ENV: "staging"
           STORAGE_PROVIDER: "local"
           LOCAL_STORAGE_DIR: "/app/.upload"
           EMAIL_TRANSPORT: "simulation"
