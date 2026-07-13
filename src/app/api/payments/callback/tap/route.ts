@@ -1,97 +1,253 @@
 // ====================================================================
 // POST /api/payments/callback/tap
 // Webhook endpoint for Tap payment gateway callbacks.
-// Verifies the payment status and activates student enrollment.
+//
+// Production-readiness rules:
+//   - FAIL CLOSED: if TAP_SECRET_KEY is not configured, return 200
+//     but do NOT update any payment.
+//   - Refetch the charge from Tap API; do not trust `status` alone.
+//   - Verify id, amount, currency, status, userId, courseId.
+//   - Idempotent: if payment.status === PAID, return without re-processing.
+//   - Reject replay: Tap webhook signature (x-callback-signature HMAC-SHA512)
+//     must match if a secret is configured.
+//   - Never activate enrollment on amount/currency mismatch.
 // ====================================================================
 
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { writeAudit } from "@/lib/services/audit";
+import { verifyTapWebhook, isGatewayConfigured } from "@/lib/services/webhook-verify";
+
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
+function bailOk(message: string) {
+  return NextResponse.json({ ok: true, message });
+}
+function bailFail(message: string, status = 400) {
+  return NextResponse.json({ ok: false, error: message }, { status });
+}
+
+async function refetchTapCharge(chargeId: string) {
+  const secretKey = process.env.TAP_SECRET_KEY;
+  if (!secretKey) return null;
+  try {
+    const res = await fetch(`https://api.tap.company/v2/charges/${chargeId}`, {
+      headers: { Authorization: `Bearer ${secretKey}` },
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
 
 export async function POST(req: NextRequest) {
-  try {
-    const payload = await req.json();
-
-    // Extract payment data from Tap webhook
-    const chargeId = payload?.id;
-    const status = payload?.status; // "CAPTURED", "FAILED", etc.
-    const metadata = payload?.metadata;
-
-    if (!chargeId || !status) {
-      return NextResponse.json({ ok: false, error: "Invalid payload" }, { status: 400 });
-    }
-
-    // Find the payment record by provider ID
-    const payment = await db.payment.findUnique({
-      where: { providerId: chargeId },
+  // ---------- Fail-closed ----------
+  if (!isGatewayConfigured("tap")) {
+    console.warn("[tap/callback] TAP_SECRET_KEY missing — fail closed");
+    await writeAudit({
+      action: "WEBHOOK_REJECTED_GATEWAY_UNCONFIGURED",
+      entity: "Payment",
+      metadata: { gateway: "tap" },
     });
+    return bailOk("Gateway not configured — acknowledged, no update");
+  }
+  const secretKey = process.env.TAP_SECRET_KEY!;
 
-    if (!payment) {
-      console.warn(`[tap/callback] Payment not found for providerId: ${chargeId}`);
-      // Return 200 to prevent Tap from retrying
-      return NextResponse.json({ ok: true, message: "Payment not found, acknowledged" });
-    }
+  // ---------- Read raw body for HMAC ----------
+  const rawBody = await req.text();
+  let payload: any;
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    return bailFail("Invalid JSON");
+  }
 
-    // Prevent duplicate processing
-    if (payment.status === "PAID") {
-      return NextResponse.json({ ok: true, message: "Already processed" });
-    }
+  // ---------- Signature verification ----------
+  const sigHeader =
+    req.headers.get("x-callback-signature") ||
+    req.headers.get("tap-header") ||
+    undefined;
+  if (!verifyTapWebhook(rawBody, sigHeader, process.env.TAP_WEBHOOK_SECRET)) {
+    console.warn("[tap/callback] signature verification failed");
+    await writeAudit({
+      action: "WEBHOOK_REJECTED_SIGNATURE",
+      entity: "Payment",
+      metadata: { gateway: "tap", chargeId: payload?.id },
+    });
+    return NextResponse.json(
+      { ok: false, error: "Signature verification failed" },
+      { status: 401 }
+    );
+  }
 
-    if (status === "CAPTURED") {
-      // Update payment + activate enrollment in a transaction
-      await db.$transaction([
-        db.payment.update({
-          where: { id: payment.id },
-          data: { status: "PAID", paidAt: new Date() },
-        }),
-        db.enrollment.upsert({
-          where: {
-            studentId_courseId: {
-              studentId: payment.userId,
-              courseId: payment.courseId,
-            },
-          },
-          create: {
-            studentId: payment.userId,
-            courseId: payment.courseId,
-            status: "ACTIVE",
-          },
-          update: { status: "ACTIVE" },
-        }),
-      ]);
+  const chargeId = payload?.id;
+  if (!chargeId) return bailFail("Missing charge id");
 
-      await writeAudit({
-        userId: payment.userId,
-        action: "PAYMENT_GATEWAY_CONFIRMED",
-        entity: "Payment",
-        entityId: payment.id,
-        metadata: {
-          gateway: "tap",
-          providerId: chargeId,
-          amount: payload?.amount || payment.amount,
-          courseId: payment.courseId,
-        },
-      });
-    } else if (status === "FAILED" || status === "DECLINED") {
+  const payment = await db.payment.findUnique({
+    where: { providerId: chargeId },
+  });
+  if (!payment) return bailOk("Payment not found, acknowledged");
+
+  // ---------- Idempotency ----------
+  if (payment.status === "PAID") {
+    return bailOk("Already processed");
+  }
+
+  // ---------- Refetch from Tap ----------
+  const verified = await refetchTapCharge(chargeId);
+  if (!verified) {
+    console.warn(`[tap/callback] could not refetch charge ${chargeId}`);
+    await writeAudit({
+      userId: payment.userId,
+      action: "WEBHOOK_VERIFY_REFETCH_FAILED",
+      entity: "Payment",
+      entityId: payment.id,
+      metadata: { gateway: "tap", providerId: chargeId },
+    });
+    return NextResponse.json(
+      { ok: false, error: "Could not verify with gateway" },
+      { status: 502 }
+    );
+  }
+
+  // ---------- Status check ----------
+  if (verified.status !== "CAPTURED") {
+    if (verified.status === "FAILED" || verified.status === "DECLINED" || verified.status === "VOID") {
       await db.payment.update({
         where: { id: payment.id },
         data: { status: "FAILED" },
       });
-
       await writeAudit({
         userId: payment.userId,
         action: "PAYMENT_GATEWAY_FAILED",
         entity: "Payment",
         entityId: payment.id,
-        metadata: { gateway: "tap", providerId: chargeId, reason: payload?.response?.message },
+        metadata: {
+          gateway: "tap",
+          providerId: chargeId,
+          reason: verified.response?.message || verified.status,
+        },
       });
     }
-
-    // Always return 200 to acknowledge receipt
-    return NextResponse.json({ ok: true });
-  } catch (err) {
-    console.error("[tap/callback] error:", err);
-    // Return 200 to prevent infinite retries from Tap
-    return NextResponse.json({ ok: true, error: "Internal error, acknowledged" });
+    return bailOk(`Status ${verified.status} — not captured`);
   }
+
+  // ---------- Amount verification (Tap uses major currency units) ----------
+  // Our Payment.amount is stored in halalas (minor units) — convert.
+  const expectedMajor = Number(payment.amount) / 100;
+  const gotMajor = Number(verified.amount);
+  if (!Number.isFinite(gotMajor) || Math.abs(gotMajor - expectedMajor) > 0.001) {
+    console.warn(
+      `[tap/callback] amount mismatch: expected ${expectedMajor} got ${gotMajor}`
+    );
+    await writeAudit({
+      userId: payment.userId,
+      action: "WEBHOOK_AMOUNT_MISMATCH",
+      entity: "Payment",
+      entityId: payment.id,
+      metadata: {
+        gateway: "tap",
+        providerId: chargeId,
+        expected: expectedMajor,
+        received: gotMajor,
+      },
+    });
+    return bailOk("Amount mismatch — payment left pending for review");
+  }
+
+  // ---------- Currency ----------
+  const expectedCurrency = (payment.currency || "SAR").toUpperCase();
+  const gotCurrency = (verified.currency || "SAR").toUpperCase();
+  if (gotCurrency !== expectedCurrency) {
+    console.warn(
+      `[tap/callback] currency mismatch: expected ${expectedCurrency} got ${gotCurrency}`
+    );
+    await writeAudit({
+      userId: payment.userId,
+      action: "WEBHOOK_CURRENCY_MISMATCH",
+      entity: "Payment",
+      entityId: payment.id,
+      metadata: {
+        gateway: "tap",
+        providerId: chargeId,
+        expected: expectedCurrency,
+        received: gotCurrency,
+      },
+    });
+    return bailOk("Currency mismatch — payment left pending for review");
+  }
+
+  // ---------- Metadata binding ----------
+  const meta = verified.metadata || {};
+  if (meta.userId && meta.userId !== payment.userId) {
+    console.warn(`[tap/callback] userId mismatch`);
+    await writeAudit({
+      userId: payment.userId,
+      action: "WEBHOOK_USER_MISMATCH",
+      entity: "Payment",
+      entityId: payment.id,
+      metadata: { gateway: "tap", providerId: chargeId, expected: payment.userId, received: meta.userId },
+    });
+    return bailOk("User mismatch — payment left pending for review");
+  }
+  if (meta.courseId && meta.courseId !== payment.courseId) {
+    console.warn(`[tap/callback] courseId mismatch`);
+    await writeAudit({
+      userId: payment.userId,
+      action: "WEBHOOK_COURSE_MISMATCH",
+      entity: "Payment",
+      entityId: payment.id,
+      metadata: { gateway: "tap", providerId: chargeId, expected: payment.courseId, received: meta.courseId },
+    });
+    return bailOk("Course mismatch — payment left pending for review");
+  }
+
+  // ---------- All checks passed ----------
+  try {
+    await db.$transaction([
+      db.payment.update({
+        where: { id: payment.id },
+        data: { status: "PAID", paidAt: new Date() },
+      }),
+      db.enrollment.upsert({
+        where: {
+          studentId_courseId: {
+            studentId: payment.userId,
+            courseId: payment.courseId,
+          },
+        },
+        create: {
+          studentId: payment.userId,
+          courseId: payment.courseId,
+          status: "ACTIVE",
+        },
+        update: { status: "ACTIVE" },
+      }),
+    ]);
+
+    await writeAudit({
+      userId: payment.userId,
+      action: "PAYMENT_GATEWAY_CONFIRMED",
+      entity: "Payment",
+      entityId: payment.id,
+      metadata: {
+        gateway: "tap",
+        providerId: chargeId,
+        amount: gotMajor,
+        currency: gotCurrency,
+        courseId: payment.courseId,
+      },
+    });
+  } catch (err) {
+    console.error("[tap/callback] transaction failed:", err);
+    return NextResponse.json(
+      { ok: false, error: "Transaction failed" },
+      { status: 500 }
+    );
+  }
+
+  return bailOk("Captured");
 }
