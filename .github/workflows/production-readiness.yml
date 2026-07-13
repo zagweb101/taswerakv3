@@ -204,7 +204,7 @@ jobs:
             -e HOME=/app \
             --entrypoint sh \
             taswerak:ci \
-            -c "node node_modules/prisma/build/index.js migrate deploy"
+            -c "npx prisma migrate deploy"
 
       - name: Start Taswerak container
         env:

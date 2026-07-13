@@ -76,19 +76,18 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 # Copy prisma migrations + schema for `prisma migrate deploy`
 COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
 
+# Copy prisma.config.ts from builder
+COPY --from=builder --chown=nextjs:nodejs /app/prisma.config.ts ./prisma.config.ts
+
+# Copy the ENTIRE node_modules from the deps stage so that prisma CLI
+# has all its transitive dependencies (effect, @prisma/config, etc).
+# The standalone output's node_modules is incomplete — it only includes
+# deps traced by Next.js, not deps needed by the prisma CLI.
+# We use the deps stage (not builder) to avoid any build artifacts.
+COPY --from=deps --chown=nextjs:nodejs /app/node_modules ./node_modules
+
 # Copy the generated Prisma Client from builder (needed by @prisma/client)
 COPY --from=builder --chown=nextjs:nodejs /app/node_modules/.prisma ./node_modules/.prisma
-
-# Copy prisma CLI + @prisma packages from builder (needed for migrate deploy)
-# These are copied from the builder's node_modules to avoid npm install issues
-# with --no-save not creating .bin symlinks or not resolving 'prisma/config'.
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/prisma ./node_modules/prisma
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/@prisma ./node_modules/@prisma
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/dotenv ./node_modules/dotenv
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/pg ./node_modules/pg
-
-# Also copy prisma.config.ts from builder
-COPY --from=builder --chown=nextjs:nodejs /app/prisma.config.ts ./prisma.config.ts
 
 # Persistent volume for local-storage mode (ignored when using MinIO)
 RUN mkdir -p /app/.upload && chown -R nextjs:nodejs /app/.upload
@@ -104,6 +103,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -fsS http://localhost:3000/api/health/ready || exit 1
 
 # Start: apply migrations THEN start Node.js server
-# Use 'node node_modules/prisma/build/index.js' instead of npx to avoid
-# npm cache issues. This is the prisma CLI entry point.
-CMD ["sh", "-c", "node node_modules/prisma/build/index.js migrate deploy && node server.js"]
+CMD ["sh", "-c", "npx prisma migrate deploy && node server.js"]
