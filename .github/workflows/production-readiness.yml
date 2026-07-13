@@ -211,14 +211,19 @@ jobs:
           DATABASE_URL: "postgresql://taswerak:taswerak_ci_pw@localhost:5432/taswerak_ci?schema=public"
           DIRECT_URL: "postgresql://taswerak:taswerak_ci_pw@localhost:5432/taswerak_ci?schema=public"
           AUTH_SECRET: "ci-smoke-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-          NEXTAUTH_URL: "http://localhost:3000"
-          # Use 'staging' so EMAIL_TRANSPORT=simulation is allowed.
-          # In production, simulation is forbidden and would make
-          # /api/health/ready return 503 (env validation failure).
-          NODE_ENV: "staging"
+          # Next.js standalone always sets NODE_ENV=production internally,
+          # so we must provide production-compatible env vars.
+          NEXTAUTH_URL: "https://smoke.test.local"
+          NODE_ENV: "production"
           STORAGE_PROVIDER: "local"
           LOCAL_STORAGE_DIR: "/app/.upload"
-          EMAIL_TRANSPORT: "simulation"
+          # SMTP must be configured when NODE_ENV=production
+          EMAIL_TRANSPORT: "smtp"
+          SMTP_HOST: "smtp.example.com"
+          SMTP_PORT: "587"
+          SMTP_USER: "user@example.com"
+          SMTP_PASSWORD: "dummy-password"
+          EMAIL_FROM: "no-reply@example.com"
           PAYMENT_GATEWAY: "manual"
           ENABLE_DEMO_SEED: "false"
         run: |
@@ -233,6 +238,11 @@ jobs:
             -e STORAGE_PROVIDER="$STORAGE_PROVIDER" \
             -e LOCAL_STORAGE_DIR="$LOCAL_STORAGE_DIR" \
             -e EMAIL_TRANSPORT="$EMAIL_TRANSPORT" \
+            -e SMTP_HOST="$SMTP_HOST" \
+            -e SMTP_PORT="$SMTP_PORT" \
+            -e SMTP_USER="$SMTP_USER" \
+            -e SMTP_PASSWORD="$SMTP_PASSWORD" \
+            -e EMAIL_FROM="$EMAIL_FROM" \
             -e PAYMENT_GATEWAY="$PAYMENT_GATEWAY" \
             -e ENABLE_DEMO_SEED="$ENABLE_DEMO_SEED" \
             -v taswerak_smoke_uploads:/app/.upload \
