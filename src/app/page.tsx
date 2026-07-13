@@ -8,7 +8,11 @@ import { LandingTestimonials } from "@/components/landing/landing-testimonials";
 import { LandingCTA } from "@/components/landing/landing-cta";
 import { LandingFooter } from "@/components/landing/landing-footer";
 
-export const revalidate = 3600;
+// Force dynamic rendering — the landing page reads CMS content from the
+// database at request time, so it cannot be statically prerendered at
+// build time (the database is not available during `next build`).
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export default async function HomePage() {
   return (
