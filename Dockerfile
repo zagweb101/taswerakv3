@@ -77,21 +77,11 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 # Copy prisma migrations + schema for `prisma migrate deploy`
 COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
 
-# Prisma CLI + generated client (needed for migrate deploy at startup)
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/.prisma ./node_modules/.prisma
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/@prisma ./node_modules/@prisma
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/prisma ./node_modules/prisma
-# Prisma adapter runtime deps (pg + all transitive deps)
-# Copy the entire pg dependency tree to avoid missing individual packages
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/pg ./node_modules/pg
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/pg-types ./node_modules/pg-types
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/pg-connection-string ./node_modules/pg-connection-string
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/pg-pool ./node_modules/pg-pool
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/pg-protocol ./node_modules/pg-protocol
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/postgres-bytea ./node_modules/postgres-bytea
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/postgres-array ./node_modules/postgres-array
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/postgres-date ./node_modules/postgres-date
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/postgres-int ./node_modules/postgres-int
+# Copy the ENTIRE node_modules from builder so prisma migrate deploy
+# has all the runtime deps it needs (prisma CLI, @prisma/adapter-pg,
+# pg, pg-pool, pg-protocol, etc). The standalone output only traces
+# deps used by the server.js — it misses deps needed only by the CLI.
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules ./node_modules
 
 # Persistent volume for local-storage mode (ignored when using MinIO)
 RUN mkdir -p /app/.upload && chown -R nextjs:nodejs /app/.upload
