@@ -68,8 +68,8 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      - name: Install dependencies (npm ci)
-        run: npm ci
+      - name: Install dependencies (npm ci --legacy-peer-deps)
+        run: npm ci --legacy-peer-deps
 
       - name: Generate Prisma Client
         run: npx prisma generate
@@ -108,8 +108,14 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      - name: Install dependencies (npm ci)
-        run: npm ci
+      - name: Install dependencies (npm ci --include=dev --legacy-peer-deps)
+        # --include=dev ensures devDependencies (prisma, typescript, vitest)
+        # are installed even when NODE_ENV=production, so the postinstall
+        # `prisma generate` step succeeds.
+        # --legacy-peer-deps matches how the lockfile was generated
+        # (next-auth@5.0.0-beta declares peerOptional nodemailer@^7.0.7
+        # which conflicts with our nodemailer@6.9.15).
+        run: npm ci --include=dev --legacy-peer-deps
 
       - name: Generate Prisma Client
         run: npx prisma generate
@@ -195,20 +201,29 @@ jobs:
             --network host \
             -e DATABASE_URL="$DATABASE_URL" \
             -e DIRECT_URL="$DIRECT_URL" \
-            -v "$PWD/prisma:/app/prisma:ro" \
+            -e HOME=/app \
+            --entrypoint sh \
             taswerak:ci \
-            sh -c "npx prisma migrate deploy"
+            -c "npx prisma migrate deploy"
 
       - name: Start Taswerak container
         env:
           DATABASE_URL: "postgresql://taswerak:taswerak_ci_pw@localhost:5432/taswerak_ci?schema=public"
           DIRECT_URL: "postgresql://taswerak:taswerak_ci_pw@localhost:5432/taswerak_ci?schema=public"
           AUTH_SECRET: "ci-smoke-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-          NEXTAUTH_URL: "http://localhost:3000"
+          # Next.js standalone always sets NODE_ENV=production internally,
+          # so we must provide production-compatible env vars.
+          NEXTAUTH_URL: "https://smoke.test.local"
           NODE_ENV: "production"
           STORAGE_PROVIDER: "local"
           LOCAL_STORAGE_DIR: "/app/.upload"
-          EMAIL_TRANSPORT: "simulation"
+          # SMTP must be configured when NODE_ENV=production
+          EMAIL_TRANSPORT: "smtp"
+          SMTP_HOST: "smtp.example.com"
+          SMTP_PORT: "587"
+          SMTP_USER: "user@example.com"
+          SMTP_PASSWORD: "dummy-password"
+          EMAIL_FROM: "no-reply@example.com"
           PAYMENT_GATEWAY: "manual"
           ENABLE_DEMO_SEED: "false"
         run: |
@@ -223,26 +238,52 @@ jobs:
             -e STORAGE_PROVIDER="$STORAGE_PROVIDER" \
             -e LOCAL_STORAGE_DIR="$LOCAL_STORAGE_DIR" \
             -e EMAIL_TRANSPORT="$EMAIL_TRANSPORT" \
+            -e SMTP_HOST="$SMTP_HOST" \
+            -e SMTP_PORT="$SMTP_PORT" \
+            -e SMTP_USER="$SMTP_USER" \
+            -e SMTP_PASSWORD="$SMTP_PASSWORD" \
+            -e EMAIL_FROM="$EMAIL_FROM" \
             -e PAYMENT_GATEWAY="$PAYMENT_GATEWAY" \
             -e ENABLE_DEMO_SEED="$ENABLE_DEMO_SEED" \
             -v taswerak_smoke_uploads:/app/.upload \
             taswerak:ci
           echo "Container started."
 
-      - name: Wait for /api/health/ready (up to 90s)
+      - name: Wait for /api/health/ready (up to 120s)
         run: |
-          for i in $(seq 1 30); do
-            CODE=$(curl -s -o /tmp/ready.json -w "%{http_code}" http://localhost:3000/api/health/ready || echo "000")
-            echo "attempt $i → HTTP $CODE"
+          # First test /api/health/live (trivial — no DB, no imports)
+          echo "=== Testing /api/health/live ==="
+          for i in $(seq 1 10); do
+            LIVE_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/health/live 2>/dev/null || echo "000")
+            echo "live attempt $i → HTTP $LIVE_CODE"
+            if [ "$LIVE_CODE" = "200" ]; then break; fi
+            sleep 3
+          done
+          
+          # Now test /api/health/ready
+          echo ""
+          echo "=== Testing /api/health/ready ==="
+          for i in $(seq 1 40); do
+            RESPONSE=$(curl -s -w "\n%{http_code}" http://localhost:3000/api/health/ready 2>/dev/null || echo -e "\n000")
+            CODE=$(echo "$RESPONSE" | tail -1)
+            BODY=$(echo "$RESPONSE" | head -n -1)
+            echo "ready attempt $i → HTTP $CODE"
             if [ "$CODE" = "200" ]; then
               echo "✅ /api/health/ready returned 200"
-              cat /tmp/ready.json
+              echo "$BODY"
               exit 0
+            fi
+            # Print the response body on first attempt for debugging
+            if [ "$i" = "1" ]; then
+              echo "--- response body ---"
+              echo "$BODY"
+              echo "--- end response body ---"
             fi
             sleep 3
           done
-          echo "❌ /api/health/ready did not return 200 within 90s"
-          docker logs taswerak-smoke || true
+          echo "❌ /api/health/ready did not return 200 within 120s"
+          echo "=== Container logs ==="
+          docker logs taswerak-smoke 2>&1 | tail -50
           exit 1
 
       - name: Smoke test — GET /api/health/live must be HTTP 200
