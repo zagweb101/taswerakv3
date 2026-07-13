@@ -8,6 +8,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { db } from "@/lib/db";
+import { writeAudit } from "@/lib/services/audit";
 
 const schema = z.object({
   courseId: z.string().min(1),

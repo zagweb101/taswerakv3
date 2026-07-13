@@ -6,6 +6,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { db } from "@/lib/db";
+import { writeAudit } from "@/lib/services/audit";
 
 export async function PATCH(
   req: NextRequest,

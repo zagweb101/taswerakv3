@@ -7,7 +7,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { db } from "@/lib/db";
-import { notify } from "@/lib/services/audit";
+import { notify, writeAudit } from "@/lib/services/audit";
 
 const replySchema = z.object({
   body: z.string().min(1, "الرد مطلوب").max(5000),
