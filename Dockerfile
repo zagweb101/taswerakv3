@@ -54,6 +54,9 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV HOSTNAME=0.0.0.0
 ENV PORT=3000
+# Set HOME to /app so npx/prisma can write cache files (the nextjs user
+# has no home directory by default — HOME would be /nonexistent).
+ENV HOME=/app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssl \
@@ -101,5 +104,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -fsS http://localhost:3000/api/health/ready || exit 1
 
 # Start: apply migrations THEN start Node.js server
-# SIGTERM is handled by Next.js standalone server.js (graceful shutdown)
-CMD ["sh", "-c", "npx prisma migrate deploy && node server.js"]
+# Use ./node_modules/.bin/prisma instead of npx to avoid npx trying to
+# fetch prisma from the registry (which fails when HOME is not writable
+# or when the registry is unreachable).
+CMD ["sh", "-c", "./node_modules/.bin/prisma migrate deploy && node server.js"]
