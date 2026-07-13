@@ -1,0 +1,145 @@
+# ====================================================================
+# Production Readiness CI — runs on every PR and on every push to the
+# agent/production-readiness branch. Mirrors the local verification
+# commands so the same gates apply locally and in CI.
+#
+# Jobs:
+#   1. lint-typecheck-test — fast: ESLint + tsc + Vitest (unit only)
+#   2. build               — full Next.js production build
+#   3. docker              — Docker image build (no push)
+#
+# No production secrets are used. PostgreSQL service container is
+# available for any future integration tests; migrations are applied
+# before tests run.
+# ====================================================================
+
+name: Production Readiness
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [agent/production-readiness]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-typecheck-test:
+    name: Lint + Typecheck + Test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: taswerak
+          POSTGRES_PASSWORD: taswerak_ci_pw
+          POSTGRES_DB: taswerak_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U taswerak"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: "postgresql://taswerak:taswerak_ci_pw@localhost:5432/taswerak_ci?schema=public"
+      DIRECT_URL: "postgresql://taswerak:taswerak_ci_pw@localhost:5432/taswerak_ci?schema=public"
+      AUTH_SECRET: "ci-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      NEXTAUTH_URL: "http://localhost:3000"
+      NODE_ENV: "test"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Apply migrations (clean DB)
+        run: npx prisma migrate deploy
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests
+        run: npm test
+        env:
+          # Tests that touch env validation need a clean NODE_ENV
+          NODE_ENV: test
+
+  build:
+    name: Next.js production build
+    runs-on: ubuntu-latest
+    needs: lint-typecheck-test
+
+    env:
+      # Build does NOT need real secrets — only placeholders that satisfy
+      # the build-time type checks. Runtime secrets are injected at deploy.
+      DATABASE_URL: "postgresql://placeholder:placeholder@localhost:5432/placeholder?schema=public"
+      AUTH_SECRET: "ci-build-placeholder-secret-aaaaaaaaaaaaaaaaaaaaa"
+      NEXTAUTH_URL: "https://example.com"
+      NODE_ENV: "production"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify standalone artifact exists
+        run: test -f .next/standalone/server.js
+
+  docker:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    needs: build
+    # Skip docker job on PRs from forks (no cache permissions)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build production image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: taswerak:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify image was built
+        run: docker image inspect taswerak:ci --format '{{.Id}}'
