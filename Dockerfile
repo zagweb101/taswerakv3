@@ -27,7 +27,11 @@ COPY package.json package-lock.json* ./
 COPY prisma ./prisma
 # Install ALL deps (including devDeps for prisma generate). We do NOT
 # copy .env here — no secrets in the build stage.
-RUN npm ci
+# --legacy-peer-deps is needed because next-auth@5.0.0-beta declares
+# peerOptional nodemailer@^7.0.7 which conflicts with our nodemailer@6.9.15.
+# The lockfile was generated with --legacy-peer-deps so we must install
+# with the same flag for the build to succeed.
+RUN npm ci --legacy-peer-deps
 
 # ---------- 3. Build ----------
 FROM base AS builder

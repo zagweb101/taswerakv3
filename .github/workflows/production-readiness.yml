@@ -68,8 +68,8 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      - name: Install dependencies (npm ci)
-        run: npm ci
+      - name: Install dependencies (npm ci --legacy-peer-deps)
+        run: npm ci --legacy-peer-deps
 
       - name: Generate Prisma Client
         run: npx prisma generate
@@ -108,11 +108,14 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      - name: Install dependencies (npm ci --include=dev)
+      - name: Install dependencies (npm ci --include=dev --legacy-peer-deps)
         # --include=dev ensures devDependencies (prisma, typescript, vitest)
         # are installed even when NODE_ENV=production, so the postinstall
         # `prisma generate` step succeeds.
-        run: npm ci --include=dev
+        # --legacy-peer-deps matches how the lockfile was generated
+        # (next-auth@5.0.0-beta declares peerOptional nodemailer@^7.0.7
+        # which conflicts with our nodemailer@6.9.15).
+        run: npm ci --include=dev --legacy-peer-deps
 
       - name: Generate Prisma Client
         run: npx prisma generate
