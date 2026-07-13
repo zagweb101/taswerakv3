@@ -39,8 +39,8 @@ export async function POST(req: NextRequest) {
     }
 
     // Extract courseId from URL
-    const match = req.nextUrl.pathname.match(/\/api\/instructor\/courses\/(?<id>[^\/]+)\//);
-    const courseId = match?.groups?.id;
+    const match = req.nextUrl.pathname.match(/\/api\/instructor\/courses\/([^/]+)\//);
+    const courseId = match?.[1];
     if (!courseId) {
       return NextResponse.json({ ok: false, error: "معرف الدورة غير صالح" }, { status: 400 });
     }
