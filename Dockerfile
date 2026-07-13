@@ -80,8 +80,10 @@ COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
 # This is much faster than copying the entire builder node_modules
 # (which includes puppeteer's Chromium at ~300MB).
 # We use --no-save to avoid modifying package.json, --legacy-peer-deps
-# to match the lockfile.
-RUN npm install --no-save --legacy-peer-deps --omit=dev \
+# to match the lockfile. Do NOT use --omit=dev here because prisma is
+# listed as a devDependency in package.json — we need it installed
+# explicitly regardless.
+RUN npm install --no-save --legacy-peer-deps \
     prisma@^7.8.0 \
     @prisma/client@^7.8.0 \
     @prisma/adapter-pg@^7.8.0 \
