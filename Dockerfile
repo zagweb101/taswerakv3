@@ -25,12 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 FROM base AS deps
 COPY package.json package-lock.json* ./
 COPY prisma ./prisma
-# Install ALL deps (including devDeps for prisma generate). We do NOT
-# copy .env here — no secrets in the build stage.
 # --legacy-peer-deps is needed because next-auth@5.0.0-beta declares
 # peerOptional nodemailer@^7.0.7 which conflicts with our nodemailer@6.9.15.
-# The lockfile was generated with --legacy-peer-deps so we must install
-# with the same flag for the build to succeed.
 RUN npm ci --legacy-peer-deps
 
 # ---------- 3. Build ----------
@@ -77,11 +73,19 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 # Copy prisma migrations + schema for `prisma migrate deploy`
 COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
 
-# Copy the ENTIRE node_modules from builder so prisma migrate deploy
-# has all the runtime deps it needs (prisma CLI, @prisma/adapter-pg,
-# pg, pg-pool, pg-protocol, etc). The standalone output only traces
-# deps used by the server.js — it misses deps needed only by the CLI.
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules ./node_modules
+# Install ONLY the prisma CLI + pg adapter runtime deps in the runner.
+# This is much faster than copying the entire builder node_modules
+# (which includes puppeteer's Chromium at ~300MB).
+# We use --no-save to avoid modifying package.json, --legacy-peer-deps
+# to match the lockfile.
+RUN npm install --no-save --legacy-peer-deps --omit=dev \
+    prisma@^7.8.0 \
+    @prisma/client@^7.8.0 \
+    @prisma/adapter-pg@^7.8.0 \
+    pg@^8.13.1
+
+# Copy the generated Prisma Client from builder (needed by @prisma/client)
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/.prisma ./node_modules/.prisma
 
 # Persistent volume for local-storage mode (ignored when using MinIO)
 RUN mkdir -p /app/.upload && chown -R nextjs:nodejs /app/.upload
