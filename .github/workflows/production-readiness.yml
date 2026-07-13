@@ -1,0 +1,282 @@
+# ====================================================================
+# Production Readiness CI — runs on every PR and on every push to the
+# agent/production-readiness branch. Mirrors the local verification
+# commands so the same gates apply locally and in CI.
+#
+# Jobs:
+#   1. lint-typecheck-test — fast: ESLint + tsc + Vitest (unit only)
+#        + npx prisma migrate deploy on a CLEAN PostgreSQL service
+#          container, so migrations are verified end-to-end.
+#   2. build               — full Next.js production build
+#   3. docker              — Docker image build (no push)
+#   4. docker-smoke        — runs the built image against a fresh
+#        PostgreSQL service container, waits for /api/health/ready,
+#        then asserts:
+#          GET /api/health/live                     → HTTP 200
+#          GET /api/health/ready                    → HTTP 200
+#          GET /api/files/private/private/receipts/x.jpg  → HTTP 401 or 403
+#
+# No production secrets are used. PostgreSQL service container uses a
+# CI-only password. No Artifacts containing sensitive data are uploaded.
+# ====================================================================
+
+name: Production Readiness
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [agent/production-readiness]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-typecheck-test:
+    name: Lint + Typecheck + Test + Migrate
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: taswerak
+          POSTGRES_PASSWORD: taswerak_ci_pw
+          POSTGRES_DB: taswerak_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U taswerak"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: "postgresql://taswerak:taswerak_ci_pw@localhost:5432/taswerak_ci?schema=public"
+      DIRECT_URL: "postgresql://taswerak:taswerak_ci_pw@localhost:5432/taswerak_ci?schema=public"
+      AUTH_SECRET: "ci-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      NEXTAUTH_URL: "http://localhost:3000"
+      NODE_ENV: "test"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Apply migrations on clean DB (npx prisma migrate deploy)
+        run: npx prisma migrate deploy
+
+      - name: Lint (npm run lint)
+        run: npm run lint
+
+      - name: Typecheck (npm run typecheck)
+        run: npm run typecheck
+
+      - name: Tests (npm test)
+        run: npm test
+        env:
+          NODE_ENV: test
+
+  build:
+    name: Next.js production build (npm run build)
+    runs-on: ubuntu-latest
+    needs: lint-typecheck-test
+
+    env:
+      DATABASE_URL: "postgresql://placeholder:placeholder@localhost:5432/placeholder?schema=public"
+      AUTH_SECRET: "ci-build-placeholder-secret-aaaaaaaaaaaaaaaaaaaaa"
+      NEXTAUTH_URL: "https://example.com"
+      NODE_ENV: "production"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Build (npm run build)
+        run: npm run build
+
+      - name: Verify standalone artifact exists
+        run: test -f .next/standalone/server.js
+
+  docker:
+    name: Docker image build (docker build -t taswerak:ci .)
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: taswerak:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify image was built
+        run: docker image inspect taswerak:ci --format '{{.Id}}'
+
+      - name: Save image as tarball for smoke-test job
+        run: docker save taswerak:ci -o /tmp/taswerak-ci.tar
+
+      - name: Upload image artifact (small, no source secrets)
+        uses: actions/upload-artifact@v4
+        with:
+          name: taswerak-ci-image
+          path: /tmp/taswerak-ci.tar
+          retention-days: 1
+
+  docker-smoke:
+    name: Docker smoke test (live + ready + 401)
+    runs-on: ubuntu-latest
+    needs: docker
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: taswerak
+          POSTGRES_PASSWORD: taswerak_ci_pw
+          POSTGRES_DB: taswerak_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U taswerak"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: taswerak-ci-image
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load -i /tmp/taswerak-ci.tar
+
+      - name: Run migrations against the smoke-test DB
+        env:
+          DATABASE_URL: "postgresql://taswerak:taswerak_ci_pw@localhost:5432/taswerak_ci?schema=public"
+          DIRECT_URL: "postgresql://taswerak:taswerak_ci_pw@localhost:5432/taswerak_ci?schema=public"
+        run: |
+          docker run --rm \
+            --network host \
+            -e DATABASE_URL="$DATABASE_URL" \
+            -e DIRECT_URL="$DIRECT_URL" \
+            -v "$PWD/prisma:/app/prisma:ro" \
+            taswerak:ci \
+            sh -c "npx prisma migrate deploy"
+
+      - name: Start Taswerak container
+        env:
+          DATABASE_URL: "postgresql://taswerak:taswerak_ci_pw@localhost:5432/taswerak_ci?schema=public"
+          DIRECT_URL: "postgresql://taswerak:taswerak_ci_pw@localhost:5432/taswerak_ci?schema=public"
+          AUTH_SECRET: "ci-smoke-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          NEXTAUTH_URL: "http://localhost:3000"
+          NODE_ENV: "production"
+          STORAGE_PROVIDER: "local"
+          LOCAL_STORAGE_DIR: "/app/.upload"
+          EMAIL_TRANSPORT: "simulation"
+          PAYMENT_GATEWAY: "manual"
+          ENABLE_DEMO_SEED: "false"
+        run: |
+          # Run in background; redirect logs to a file for debugging
+          docker run -d --name taswerak-smoke \
+            --network host \
+            -e DATABASE_URL="$DATABASE_URL" \
+            -e DIRECT_URL="$DIRECT_URL" \
+            -e AUTH_SECRET="$AUTH_SECRET" \
+            -e NEXTAUTH_URL="$NEXTAUTH_URL" \
+            -e NODE_ENV="$NODE_ENV" \
+            -e STORAGE_PROVIDER="$STORAGE_PROVIDER" \
+            -e LOCAL_STORAGE_DIR="$LOCAL_STORAGE_DIR" \
+            -e EMAIL_TRANSPORT="$EMAIL_TRANSPORT" \
+            -e PAYMENT_GATEWAY="$PAYMENT_GATEWAY" \
+            -e ENABLE_DEMO_SEED="$ENABLE_DEMO_SEED" \
+            -v taswerak_smoke_uploads:/app/.upload \
+            taswerak:ci
+          echo "Container started."
+
+      - name: Wait for /api/health/ready (up to 90s)
+        run: |
+          for i in $(seq 1 30); do
+            CODE=$(curl -s -o /tmp/ready.json -w "%{http_code}" http://localhost:3000/api/health/ready || echo "000")
+            echo "attempt $i → HTTP $CODE"
+            if [ "$CODE" = "200" ]; then
+              echo "✅ /api/health/ready returned 200"
+              cat /tmp/ready.json
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "❌ /api/health/ready did not return 200 within 90s"
+          docker logs taswerak-smoke || true
+          exit 1
+
+      - name: Smoke test — GET /api/health/live must be HTTP 200
+        run: |
+          CODE=$(curl -s -o /tmp/live.json -w "%{http_code}" http://localhost:3000/api/health/live)
+          echo "GET /api/health/live → HTTP $CODE"
+          cat /tmp/live.json
+          test "$CODE" = "200"
+
+      - name: Smoke test — GET /api/health/ready must be HTTP 200
+        run: |
+          CODE=$(curl -s -o /tmp/ready2.json -w "%{http_code}" http://localhost:3000/api/health/ready)
+          echo "GET /api/health/ready → HTTP $CODE"
+          cat /tmp/ready2.json
+          test "$CODE" = "200"
+
+      - name: Smoke test — private file without session must be HTTP 401 or 403
+        run: |
+          CODE=$(curl -s -o /tmp/private.json -w "%{http_code}" \
+            http://localhost:3000/api/files/private/private/receipts/2026/01/test.jpg)
+          echo "GET /api/files/private/... (no auth) → HTTP $CODE"
+          cat /tmp/private.json || true
+          if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
+            echo "✅ correctly rejected with HTTP $CODE"
+            exit 0
+          fi
+          echo "❌ expected 401 or 403, got $CODE"
+          exit 1
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker logs taswerak-smoke || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f taswerak-smoke || true
