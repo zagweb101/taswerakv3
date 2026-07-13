@@ -13,7 +13,7 @@ export default async function AdminPendingCoursesPage() {
     redirect(`/${session.user.role.toLowerCase()}`);
   }
 
-  const courses = await db.course.findMany({
+  const rawCourses = await db.course.findMany({
     where: {
       status: "PENDING_REVIEW",
     },
@@ -34,6 +34,12 @@ export default async function AdminPendingCoursesPage() {
       submittedAt: "asc",
     },
   });
+
+  const courses = rawCourses.map((c) => ({
+    ...c,
+    price: c.price ? Number(c.price) : null,
+    discountPrice: c.discountPrice ? Number(c.discountPrice) : null,
+  }));
 
   return (
     <div className="space-y-6">

@@ -26,7 +26,7 @@ export default async function CoursesPage() {
   }> = [];
 
   try {
-    courses = await db.course.findMany({
+    const dbCourses = await db.course.findMany({
       where: { status: "PUBLISHED" },
       orderBy: [{ isFeatured: "desc" }, { createdAt: "asc" }],
       select: {
@@ -42,7 +42,12 @@ export default async function CoursesPage() {
         category: true,
       },
     });
-  } catch {
+    courses = dbCourses.map((c) => ({
+      ...c,
+      price: c.price ? Number(c.price) : null,
+    })) as any;
+  } catch (err) {
+    console.error("[courses] failed to load:", err);
     // DB unavailable — use empty list, page shows fallback
     courses = [];
   }
