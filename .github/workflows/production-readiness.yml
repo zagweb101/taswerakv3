@@ -249,6 +249,12 @@ jobs:
               cat /tmp/ready.json
               exit 0
             fi
+            # Print the 503 response body on first attempt for debugging
+            if [ "$i" = "1" ]; then
+              echo "--- 503 response body ---"
+              cat /tmp/ready.json || true
+              echo "--- end response body ---"
+            fi
             sleep 3
           done
           echo "❌ /api/health/ready did not return 200 within 90s"
