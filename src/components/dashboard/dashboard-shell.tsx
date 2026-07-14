@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 import { ImpersonationBanner } from "@/components/admin/impersonation-banner";
 import { NotificationBell } from "@/components/realtime/notification-bell";
 import { BrandLogo } from "@/components/brand/brand-logo";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 export interface NavItem {
   href: string;
@@ -59,6 +60,7 @@ export function DashboardShell({
         </Link>
         <div className="flex items-center gap-2">
           <NotificationBell role={role} />
+          <ThemeToggle />
           <button
             onClick={() => setMobileOpen(true)}
             className="p-2 rounded-lg hover:bg-muted/60 transition-colors"

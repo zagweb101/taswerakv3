@@ -96,6 +96,35 @@ export async function PATCH(
     const courseName = receipt.enrollment?.course.titleAr || receipt.enrollment?.course.title || "دورة";
 
     if (action === "APPROVE") {
+      // ---------- Amount mismatch check ----------
+      // Prevent approval if the student's declaredTransferredAmount does
+      // NOT match the official expected amount — UNLESS the instructor
+      // explicitly allows a partial payment by passing
+      // `allowPartialPayment: true` in the request body.
+      const expectedAmount = Number(receipt.amount);
+      const declaredAmount = receipt.declaredTransferredAmount
+        ? Number(receipt.declaredTransferredAmount)
+        : null;
+
+      const allowPartialPayment = !!(body as any)?.allowPartialPayment === true;
+
+      if (
+        declaredAmount !== null &&
+        declaredAmount !== expectedAmount &&
+        !allowPartialPayment
+      ) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: `المبلغ المعلن (${declaredAmount} ${receipt.currency}) لا يطابق المبلغ المطلوب (${expectedAmount} ${receipt.currency}). لا يمكن الاعتماد إلا عبر تفعيل الدفع الجزئي.`,
+            code: "AMOUNT_MISMATCH",
+            expectedAmount,
+            declaredTransferredAmount: declaredAmount,
+          },
+          { status: 409 }
+        );
+      }
+
       // Update receipt
       await db.paymentReceipt.update({
         where: { id },

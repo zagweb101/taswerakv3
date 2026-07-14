@@ -1,116 +1,103 @@
 // ====================================================================
-// Taswerak — MinIO (S3-compatible) storage client
-// Used for: payment receipts, assignment submissions, certificates QR
-// Falls back to local file storage if MinIO is unreachable.
+// Taswerak — Legacy storage shim
+//
+// IMPORTANT: This module is kept only for backward compatibility.
+// New code MUST use @/lib/services/storage instead, which enforces:
+//   - public/private folder separation
+//   - real MIME detection (magic bytes)
+//   - unguessable object keys for private files
+//   - path traversal guards
+//   - private MinIO bucket (no public policy)
+//
+// The old uploadFile() signature is preserved but internally delegates
+// to uploadSecure() with visibility="public" for non-private folders.
+// Calls targeting "receipts" or "submissions" are routed to "private"
+// visibility to avoid exposing sensitive files publicly.
 // ====================================================================
 
-import { Client, BucketItem } from "minio";
-import { promises as fs } from "fs";
-import path from "path";
+import {
+  uploadSecure,
+  makeSecureObjectKey,
+  type UploadResult,
+  type StorageVisibility,
+} from "@/lib/services/storage";
 
-const endpoint = process.env.MINIO_ENDPOINT || "http://localhost:9000";
-const port = parseInt(process.env.MINIO_PORT || "9000", 10);
-const useSSL = process.env.MINIO_USE_SSL === "true";
-const accessKey = process.env.MINIO_ACCESS_KEY || "";
-const secretKey = process.env.MINIO_SECRET_KEY || "";
-const bucket = process.env.MINIO_BUCKET || "taswerak-uploads";
-const publicUrl = process.env.MINIO_PUBLIC_URL || endpoint;
-
-let client: Client | null = null;
-let clientInitFailed = false;
-
-try {
-  if (accessKey && secretKey) {
-    client = new Client({
-      endPoint: endpoint.replace(/^https?:\/\//, ""),
-      port,
-      useSSL,
-      accessKey,
-      secretKey,
-    });
+/** Determine visibility from the legacy folder name. */
+function visibilityFor(folder: string): StorageVisibility {
+  if (folder.startsWith("receipts") || folder.startsWith("submissions")) {
+    return "private";
   }
-} catch (err) {
-  console.warn("[minio] init failed, will use local fallback:", err);
-  clientInitFailed = true;
+  return "public";
+}
+
+/** Map legacy folder name to the new public/private prefix. */
+function remapFolder(folder: string, visibility: StorageVisibility): string {
+  if (visibility === "private") {
+    if (folder.startsWith("receipts")) return "private/receipts";
+    if (folder.startsWith("submissions")) return "private/submissions";
+  }
+  // Public — keep under "public/" prefix to be safe
+  if (
+    folder.startsWith("public/") ||
+    folder.startsWith("courses/thumbnails") ||
+    folder.startsWith("courses/preview")
+  ) {
+    return folder;
+  }
+  return `public/${folder}`;
 }
 
 /**
- * Upload a file to MinIO (or local fallback).
- * @returns the public URL of the uploaded file
+ * @deprecated Use uploadSecure() from @/lib/services/storage.
+ * Upload a buffer and return a URL/key.
  */
 export async function uploadFile(
   buffer: Buffer,
   objectKey: string,
   contentType: string
 ): Promise<{ url: string; provider: "minio" | "local" }> {
-  // Try MinIO first
-  if (client) {
-    try {
-      await ensureBucket();
-      await client.putObject(bucket, objectKey, buffer, buffer.length, {
-        "Content-Type": contentType,
-      });
-      const url = `${publicUrl}/${bucket}/${objectKey}`;
-      return { url, provider: "minio" };
-    } catch (err) {
-      console.warn("[minio] upload failed, falling back to local:", err);
-    }
-  }
+  // The legacy API receives a fully-built objectKey like "receipts/2026/01/abc_file.jpg".
+  // We split it back into folder + filename so the new validator can run.
+  const slashIdx = objectKey.indexOf("/");
+  const folder = slashIdx > 0 ? objectKey.slice(0, slashIdx) : objectKey;
+  const visibility = visibilityFor(folder);
+  const newFolder = remapFolder(folder, visibility);
+  const filename = slashIdx > 0 ? objectKey.slice(slashIdx + 1) : objectKey;
 
-  // Local fallback — write to .upload/ directory in project root
-  const localDir = path.join(process.cwd(), ".upload");
-  await fs.mkdir(localDir, { recursive: true });
-  const localPath = path.join(localDir, objectKey.replace(/\//g, "_"));
-  await fs.writeFile(localPath, buffer);
-  return { url: `/api/files/${objectKey.replace(/\//g, "_")}`, provider: "local" };
-}
-
-/**
- * Generate a unique object key for a file.
- * Pattern: {folder}/{yyyy}/{mm}/{cuid}.{ext}
- */
-export function makeObjectKey(folder: string, filename: string): string {
-  const now = new Date();
-  const yyyy = now.getUTCFullYear();
-  const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
-  const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const random = Math.random().toString(36).slice(2, 10);
-  return `${folder}/${yyyy}/${mm}/${random}_${safeName}`;
-}
-
-/**
- * Ensure the bucket exists (creates if missing).
- */
-async function ensureBucket(): Promise<void> {
-  if (!client) return;
+  let result: UploadResult;
   try {
-    const exists = await client.bucketExists(bucket);
-    if (!exists) {
-      await client.makeBucket(bucket);
-      // Make bucket publicly readable for image URLs
-      await client.setBucketPolicy(
-        bucket,
-        JSON.stringify({
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Effect: "Allow",
-              Principal: { AWS: ["*"] },
-              Action: ["s3:GetObject"],
-              Resource: [`arn:aws:s3:::${bucket}/*`],
-            },
-          ],
-        })
-      );
-    }
-  } catch (err) {
-    // Bucket policy may fail in some MinIO versions — non-fatal
-    console.warn("[minio] ensureBucket warning:", err);
+    result = await uploadSecure({
+      visibility,
+      folder: newFolder,
+      buffer,
+      originalFilename: filename,
+      declaredMime: contentType,
+    });
+  } catch (err: any) {
+    // Preserve the legacy contract: throw on real errors, but the legacy
+    // uploadFile() callers checked `file.type` themselves before calling,
+    // so a MIME mismatch here is a 400-class error.
+    throw err;
   }
+
+  // For private files the new API returns publicUrl=null; legacy callers
+  // stored the URL in DB. To keep them working we return the objectKey
+  // wrapped as a /api/files/private/... URL — the new protected route
+  // will serve it.
+  if (result.publicUrl) {
+    return { url: result.publicUrl, provider: result.provider };
+  }
+  return {
+    url: `/api/files/private/${result.objectKey}`,
+    provider: result.provider,
+  };
 }
 
-export const storageStatus = {
-  minioAvailable: !!client && !clientInitFailed,
-  bucket,
-  publicUrl,
-};
+/** @deprecated Use makeSecureObjectKey() from @/lib/services/storage. */
+export function makeObjectKey(folder: string, filename: string): string {
+  const visibility = visibilityFor(folder);
+  const newFolder = remapFolder(folder, visibility);
+  return makeSecureObjectKey(newFolder, filename, visibility);
+}
+
+export { storageStatus } from "@/lib/services/storage";

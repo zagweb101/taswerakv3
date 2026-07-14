@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { db } from "@/lib/db";
+import { writeAudit } from "@/lib/services/audit";
 
 // Expected payload structure
 const reorderSchema = z.object({
@@ -38,8 +39,8 @@ export async function POST(req: NextRequest) {
     }
 
     // Extract courseId from URL
-    const match = req.nextUrl.pathname.match(/\/api\/instructor\/courses\/(?<id>[^\/]+)\//);
-    const courseId = match?.groups?.id;
+    const match = req.nextUrl.pathname.match(/\/api\/instructor\/courses\/([^/]+)\//);
+    const courseId = match?.[1];
     if (!courseId) {
       return NextResponse.json({ ok: false, error: "معرف الدورة غير صالح" }, { status: 400 });
     }
@@ -57,6 +58,10 @@ export async function POST(req: NextRequest) {
     }
 
     // Transactional updates for sections and lessons order
+    const sectionCount = parsed.data.sections.length;
+    let lessonCount = 0;
+    parsed.data.sections.forEach(s => { lessonCount += s.lessons.length; });
+
     await db.$transaction(async (prisma) => {
       for (const sec of parsed.data.sections) {
         await prisma.section.update({ where: { id: sec.id }, data: { order: sec.order } });
@@ -64,6 +69,14 @@ export async function POST(req: NextRequest) {
           await prisma.lesson.update({ where: { id: les.id }, data: { order: les.order } });
         }
       }
+    });
+
+    await writeAudit({
+      userId: session.user.id,
+      action: "BUILDER_REORDER",
+      entity: "Course",
+      entityId: courseId,
+      metadata: { sectionsReordered: sectionCount, lessonsReordered: lessonCount },
     });
 
     return NextResponse.json({ ok: true, message: "تم حفظ الترتيب" });

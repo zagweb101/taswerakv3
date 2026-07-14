@@ -9,6 +9,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { db } from "@/lib/db";
+import { writeAudit } from "@/lib/services/audit";
 
 const createSchema = z.object({
   sectionId: z.string().min(1),
@@ -72,6 +73,14 @@ export async function POST(req: NextRequest) {
         isPreview,
         isPublished,
       },
+    });
+
+    await writeAudit({
+      userId: session.user.id,
+      action: "LESSON_CREATE",
+      entity: "Lesson",
+      entityId: lesson.id,
+      metadata: { courseId, sectionId, title, type },
     });
 
     return NextResponse.json({ ok: true, lesson });

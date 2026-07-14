@@ -335,6 +335,7 @@ model PaymentReceipt {
   thumbnailUrl    String?
   bankName        String
   amount          Decimal       @db.Decimal(10, 2)
+  declaredTransferredAmount Decimal? @db.Decimal(10, 2)
   currency        String        @default("SAR")
   referenceNumber String?
   status          PaymentStatus @default(PENDING)

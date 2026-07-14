@@ -8,6 +8,7 @@ import { CookieConsentBanner } from "@/components/legal/cookie-consent-banner";
 import { GoogleAnalytics } from "@/components/analytics/google-analytics";
 import { ServiceWorkerRegister } from "@/components/pwa/service-worker-register";
 import { ChatbotWidget } from "@/components/chatbot/chatbot-widget";
+import { ThemeProvider } from "@/components/theme-provider";
 import { initSentry } from "@/lib/services/sentry";
 
 // Initialize Sentry error tracking for both server and client side
@@ -107,7 +108,9 @@ export default function RootLayout({
         className={`${cairo.variable} ${tajawal.variable} antialiased bg-background text-foreground font-tajawal`}
         style={{ fontFamily: "var(--font-tajawal), system-ui, sans-serif" }}
       >
-        <SessionProvider>{children}</SessionProvider>
+        <SessionProvider>
+          <ThemeProvider>{children}</ThemeProvider>
+        </SessionProvider>
         <CookieConsentBanner />
         <GoogleAnalytics />
         <ServiceWorkerRegister />
