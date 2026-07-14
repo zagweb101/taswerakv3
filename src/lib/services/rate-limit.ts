@@ -141,14 +141,69 @@ class InMemoryBackend implements RateLimiterBackend {
 }
 
 class RedisBackend implements RateLimiterBackend {
-  // NOTE: Implementing the Redis backend requires adding `ioredis` as a
-  // dependency. We deliberately do NOT pull it in now to keep the
-  // bundle small for single-instance Coolify deployments. When needed:
-  //   1. npm install ioredis
-  //   2. Implement INCR + EXPIRE pipeline in check().
+  private client: any = null;
+  private initPromise: Promise<any> | null = null;
+
+  /**
+   * Lazily import and connect to Redis. We use dynamic import so
+   * ioredis is NOT bundled unless REDIS_URL is set — keeping the
+   * Docker image small for single-instance deployments.
+   */
+  private async getClient(): Promise<any> {
+    if (this.client) return this.client;
+    if (this.initPromise) return this.initPromise;
+
+    this.initPromise = (async () => {
+      const Redis = (await import("ioredis")).default;
+      this.client = new Redis(process.env.REDIS_URL!, {
+        maxRetriesPerRequest: 3,
+        enableReadyCheck: true,
+        lazyConnect: false,
+      });
+      this.client.on("error", (err: any) => {
+        console.error("[rate-limit] Redis error:", err.message);
+      });
+      return this.client;
+    })();
+
+    return this.initPromise;
+  }
+
   async check(opts: RateLimitOptions): Promise<RateLimitResult> {
-    // Fall back to in-memory until Redis is implemented.
-    return rateLimit(opts);
+    try {
+      const redis = await this.getClient();
+      const redisKey = `ratelimit:${opts.key}`;
+      const windowSeconds = Math.ceil(opts.windowMs / 1000);
+
+      // Atomic INCR + EXPIRE pipeline
+      const pipeline = redis.pipeline();
+      pipeline.incr(redisKey);
+      pipeline.expire(redisKey, windowSeconds, "NX"); // set TTL only on first create
+      const results: [error: Error | null, result: any][] = await pipeline.exec();
+
+      const count = results[0][1] as number;
+      const resetAt = Date.now() + opts.windowMs;
+
+      if (count > opts.limit) {
+        return {
+          success: false,
+          remaining: 0,
+          resetAt,
+          statusCode: 429,
+        };
+      }
+
+      return {
+        success: true,
+        remaining: Math.max(0, opts.limit - count),
+        resetAt,
+        statusCode: 200,
+      };
+    } catch (err) {
+      console.warn("[rate-limit] Redis failed, falling back to in-memory:", err);
+      // Fail open to in-memory — better than blocking all requests
+      return rateLimit(opts);
+    }
   }
 }
 

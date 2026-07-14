@@ -3,6 +3,7 @@
 // For instructor/admin creation, admin must use admin dashboard later.
 // ====================================================================
 
+import { checkCSRF } from "@/lib/csrf";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import bcrypt from "bcryptjs";
@@ -26,6 +27,8 @@ const schema = z.object({
 
 export async function POST(req: Request) {
   try {
+    const _csrfErr = checkCSRF(req);
+    if (_csrfErr) return NextResponse.json({ ok: false, error: _csrfErr }, { status: 403 });
     // Rate limit: 5 signups per hour per IP
     const ip = getClientIP(req);
     const rl = rateLimitPresets.signup(ip);

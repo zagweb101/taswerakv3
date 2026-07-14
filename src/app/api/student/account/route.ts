@@ -23,6 +23,7 @@
 // Files in MinIO/local storage are deleted via deleteSecure().
 // ====================================================================
 
+import { checkCSRF } from "@/lib/csrf";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
@@ -38,6 +39,8 @@ const deleteSchema = z.object({
 
 export async function DELETE(req: NextRequest) {
   try {
+    const _csrfErr = checkCSRF(req);
+    if (_csrfErr) return NextResponse.json({ ok: false, error: _csrfErr }, { status: 403 });
     const session = await auth();
     if (!session?.user?.id) {
       return NextResponse.json({ ok: false, error: "غير مسجّل" }, { status: 401 });
