@@ -21,7 +21,7 @@ checklist and hardened across thirteen areas. The branch opens as a
 | 5 | Private files served by guessable URLs | Private files now use `crypto.randomUUID()` object keys |
 | 6 | Students could fetch other students' receipts | `/api/files/private/[...path]` does DB-backed authorization (student=own, instructor=course-enrolled, admin=any) |
 | 7 | Payment webhooks trusted `status` alone | Moyasar/Tap routes now refetch the payment from the gateway API and verify id, amount, currency, userId, courseId |
-| 8 | Webhooks without signatures accepted | HMAC-SHA256 verification with `MOYASAR_WEBHOOK_SECRET` / `TAP_WEBHOOK_SECRET`; fail-closed when secret is missing |
+| 8 | Webhooks without signatures accepted | **Moyasar**: HMAC-SHA256 of raw body with `MOYASAR_WEBHOOK_SECRET`. **Tap**: HMAC-SHA256 of official hashstring (x_id, x_amount, x_currency, x_gateway_reference, x_payment_reference, x_status, x_created) with `TAP_SECRET_KEY`. Both fail-closed when key is missing. |
 | 9 | No idempotency on duplicate webhooks | `isAlreadyPaid()` short-circuits before any DB write |
 | 10 | Seed used `Password123!` and created demo accounts unconditionally | Seed now env-driven (`SEED_ADMIN_*`), refuses `ENABLE_DEMO_SEED=true` in production, rejects weak passwords |
 | 11 | Email module silently fell back to simulation on SMTP failure in production | Email now returns `{ok:false, mode:"smtp", error}` in production; simulation is dev/staging only |
@@ -87,7 +87,7 @@ src/app/api/courses/[courseId]/builder/sections/route.ts# Fixed pre-existing Nex
 | `LOCAL_STORAGE_DIR` | warn in prod | Where local-storage files are written (mount a persistent volume here) |
 | `TRUST_PROXY` | optional | `true` to honour `X-Forwarded-For` from a trusted proxy |
 | `MOYASAR_WEBHOOK_SECRET` | required when gateway=moyasar | HMAC secret for verifying Moyasar webhooks |
-| `TAP_WEBHOOK_SECRET` | required when gateway=tap | HMAC secret for verifying Tap webhooks |
+| `TAP_SECRET_KEY` | required when gateway=tap | Used for BOTH API auth AND webhook signature verification (official hashstring method). No separate `TAP_WEBHOOK_SECRET` is needed. |
 | `SEED_ADMIN_EMAIL` | required to seed in prod | Email of the first admin |
 | `SEED_ADMIN_PASSWORD` | required to seed in prod | ≥12 chars, not a placeholder |
 | `SEED_ADMIN_NAME` | optional | Display name |
@@ -105,13 +105,16 @@ src/app/api/courses/[courseId]/builder/sections/route.ts# Fixed pre-existing Nex
    files to `.upload/private/receipts/`, and `.upload/submissions_*` to
    `.upload/private/submissions/`. The URL migration script handles DB rows;
    the physical file move is a separate shell step.
-4. **(If using MinIO)** Old objects remain in the bucket under
-   `receipts/` and `submissions/`. The new storage layer writes to
-   `private/receipts/` and `private/submissions/`. You can either:
-   - Leave old objects in place (the new URL format will still find them
-     because the new route reads from `private/receipts/...`); OR
-   - Use `mc cp --recursive` to move old objects to the new prefix
-     before running the DB migration script.
+4. **(If using MinIO)** Old objects MUST be physically moved before the
+   DB migration script runs. The new storage layer reads ONLY from
+   `private/receipts/` and `private/submissions/` prefixes — old objects
+   under `receipts/` and `submissions/` will NOT be found by the new
+   `/api/files/private/` route. Use `mc cp --recursive` to move them:
+   ```bash
+   mc cp --recursive local/taswerak-uploads/receipts/ local/taswerak-uploads/private/receipts/
+   mc cp --recursive local/taswerak-uploads/submissions/ local/taswerak-uploads/private/submissions/
+   ```
+   Then run the DB migration script to update the URLs.
 5. **Rotate `AUTH_SECRET`** — the old `change-me-...` placeholder is no
    longer accepted in production.
 6. **Set `SEED_ADMIN_*` env vars** if you plan to run `db:seed` in
@@ -124,7 +127,7 @@ npm ci                  — PASS (local)
 npx prisma generate     — PASS (local, Prisma Client v7.8.0)
 npm run lint            — PASS (local, 0 errors, 6 pre-existing warnings)
 npm run typecheck       — PASS (local)
-npm test                — PASS (local, 139/139)
+npm test                — PASS (local, 166/166)
 npm run build           — PASS (local, Next.js 16 standalone output)
 docker build            — SKIPPED locally (no docker in agent sandbox)
                           — CI 'docker' job runs: docker build -t taswerak:ci .

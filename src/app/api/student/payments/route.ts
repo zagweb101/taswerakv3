@@ -115,15 +115,20 @@ export async function POST(req: NextRequest) {
 
   // ---------- Server-side expected amount calculation ----------
   // Do NOT trust the student-submitted amount. Compute the expected
-  // amount from the course price (and any applicable discount) on the
-  // server. The student's submitted amount is recorded separately as
-  // `declaredTransferredAmount` for the instructor to compare against
-  // the expected amount during approval.
+  // amount from the course price or discount price (whichever is valid)
+  // on the server. The student's submitted amount is recorded separately
+  // as `declaredTransferredAmount` in its own DB column.
   //
-  // For free courses, expected = 0 and any positive amount is rejected
-  // (a free course does not require a receipt).
-  const coursePrice = course.price ? Number(course.price) : 0;
-  const expectedAmount = coursePrice; // TODO: apply coupon/discount here
+  // Priority: valid discountPrice > course.price
+  // A discountPrice is "valid" if it is a positive number less than
+  // the regular price.
+  const regularPrice = course.price ? Number(course.price) : 0;
+  const discountPrice = course.discountPrice ? Number(course.discountPrice) : null;
+  const hasValidDiscount =
+    discountPrice !== null &&
+    discountPrice > 0 &&
+    discountPrice < regularPrice;
+  const expectedAmount = hasValidDiscount ? discountPrice! : regularPrice;
 
   if (course.isFree || expectedAmount === 0) {
     return NextResponse.json(
@@ -133,9 +138,9 @@ export async function POST(req: NextRequest) {
   }
 
   // The student-declared amount is what they CLAIM they transferred.
-  // It does NOT have to match expectedAmount exactly (they might have
-  // made a mistake, or used a coupon), but the instructor will see
-  // both values side-by-side during approval.
+  // It is stored in a SEPARATE column (declaredTransferredAmount), NOT
+  // in notes. The instructor compares it against `amount` (the official
+  // expected amount) during approval.
   const declaredTransferredAmount = amount;
 
   // Prevent duplicate enrollment
@@ -206,16 +211,14 @@ export async function POST(req: NextRequest) {
           studentId: session.user.id,
           imageUrl,
           bankName,
-          // Store the SERVER-COMPUTED expected amount as the official
-          // receipt amount (NOT the student-declared amount). The
-          // student's declared amount is recorded in `notes` so the
-          // instructor can compare both values during approval.
+          // `amount` = server-computed expectedAmount (official amount).
+          // `declaredTransferredAmount` = what the student CLAIMS they
+          // transferred (stored in a SEPARATE column, NOT in notes).
           amount: expectedAmount,
+          declaredTransferredAmount,
           currency: course.currency,
           referenceNumber: referenceNumber || null,
-          notes: notes
-            ? `${notes}\n\n[expectedAmount=${expectedAmount} ${course.currency}, declaredTransferredAmount=${declaredTransferredAmount} ${course.currency}]`
-            : `[expectedAmount=${expectedAmount} ${course.currency}, declaredTransferredAmount=${declaredTransferredAmount} ${course.currency}]`,
+          notes: notes || null,
           status: "PENDING",
         },
       });

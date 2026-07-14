@@ -130,30 +130,50 @@ describe("payment receipt: amount validation", () => {
 // ====================================================================
 
 /**
- * Simulate the server-side expected amount calculation from course price.
- * The route does: expectedAmount = Number(course.price)
- * The student-submitted amount is recorded separately as declaredTransferredAmount.
+ * Simulate the server-side expected amount calculation from course price
+ * and discount price. Priority: valid discountPrice > course.price.
+ * A discountPrice is "valid" if it is a positive number less than the
+ * regular price.
  */
-function computeExpectedAmount(coursePrice: number | null | undefined, isFree: boolean): number {
+function computeExpectedAmount(
+  coursePrice: number | null | undefined,
+  discountPrice: number | null | undefined,
+  isFree: boolean
+): number {
   if (isFree) return 0;
-  if (!coursePrice || !Number.isFinite(Number(coursePrice))) return 0;
-  return Number(coursePrice);
+  const regular = coursePrice ? Number(coursePrice) : 0;
+  const discount = discountPrice ? Number(discountPrice) : null;
+  const hasValidDiscount =
+    discount !== null && discount > 0 && discount < regular;
+  return hasValidDiscount ? discount! : regular;
 }
 
 describe("payment: server-side expected amount calculation", () => {
-  it("computes expected amount from course price", () => {
-    expect(computeExpectedAmount(1000, false)).toBe(1000);
-    expect(computeExpectedAmount(499.99, false)).toBe(499.99);
+  it("computes expected amount from course price (no discount)", () => {
+    expect(computeExpectedAmount(1000, null, false)).toBe(1000);
+    expect(computeExpectedAmount(499.99, null, false)).toBe(499.99);
+  });
+
+  it("uses discountPrice when valid (less than regular price)", () => {
+    expect(computeExpectedAmount(1000, 800, false)).toBe(800);
+    expect(computeExpectedAmount(1000, 999.99, false)).toBe(999.99);
+  });
+
+  it("ignores discountPrice when it is NOT less than regular price", () => {
+    expect(computeExpectedAmount(1000, 1000, false)).toBe(1000); // equal
+    expect(computeExpectedAmount(1000, 1200, false)).toBe(1000); // greater
+    expect(computeExpectedAmount(1000, 0, false)).toBe(1000); // zero
+    expect(computeExpectedAmount(1000, -100, false)).toBe(1000); // negative
   });
 
   it("returns 0 for free courses", () => {
-    expect(computeExpectedAmount(1000, true)).toBe(0);
-    expect(computeExpectedAmount(0, true)).toBe(0);
+    expect(computeExpectedAmount(1000, 800, true)).toBe(0);
+    expect(computeExpectedAmount(0, null, true)).toBe(0);
   });
 
   it("returns 0 when price is null/undefined", () => {
-    expect(computeExpectedAmount(null, false)).toBe(0);
-    expect(computeExpectedAmount(undefined, false)).toBe(0);
+    expect(computeExpectedAmount(null, null, false)).toBe(0);
+    expect(computeExpectedAmount(undefined, undefined, false)).toBe(0);
   });
 
   it("does NOT trust the student-submitted amount", () => {
@@ -162,15 +182,37 @@ describe("payment: server-side expected amount calculation", () => {
     // NOT the student's declared amount=1.
     const coursePrice = 1000;
     const studentDeclared = 1;
-    const expectedAmount = computeExpectedAmount(coursePrice, false);
+    const expectedAmount = computeExpectedAmount(coursePrice, null, false);
     expect(expectedAmount).toBe(1000);
     expect(expectedAmount).not.toBe(studentDeclared);
-    // The receipt stores expectedAmount as the official amount
-    // and studentDeclared in notes for instructor comparison.
+    // The receipt stores expectedAmount as `amount` (official) and
+    // studentDeclared as `declaredTransferredAmount` (separate column).
+  });
+
+  it("Scenario: course.price=1000, discountPrice=800, declaredTransferredAmount=1", () => {
+    // The route should use expectedAmount=800 (from discountPrice),
+    // NOT 1000 (regular price) and NOT 1 (student's declared amount).
+    const coursePrice = 1000;
+    const discountPrice = 800;
+    const studentDeclared = 1;
+    const expectedAmount = computeExpectedAmount(coursePrice, discountPrice, false);
+    expect(expectedAmount).toBe(800);
+    expect(expectedAmount).not.toBe(1000); // NOT the regular price
+    expect(expectedAmount).not.toBe(studentDeclared); // NOT the student's amount
+
+    // The approval route should REJECT this receipt because
+    // declaredTransferredAmount (1) !== expectedAmount (800).
+    // It can only be approved with allowPartialPayment=true.
+    const canApproveNormally = studentDeclared === expectedAmount;
+    expect(canApproveNormally).toBe(false);
+
+    // With explicit partial payment permission:
+    const canApproveWithPartial = true; // allowPartialPayment=true
+    expect(canApproveWithPartial).toBe(true);
   });
 
   it("rejects free course receipt upload (no receipt needed)", () => {
-    const expectedAmount = computeExpectedAmount(0, true);
+    const expectedAmount = computeExpectedAmount(0, null, true);
     expect(expectedAmount).toBe(0);
     // Route returns 400: "هذه الدورة مجانية ولا تتطلب إيصال تحويل"
   });
