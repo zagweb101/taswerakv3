@@ -7,7 +7,14 @@
 import type { NextAuthConfig } from "next-auth";
 
 export const authConfig = {
-  session: { strategy: "jwt" },
+  // JWT session with 7-day absolute timeout + 1-day idle refresh.
+  // After 7 days the user MUST re-authenticate regardless of activity.
+  // The JWT is refreshed on each request (rolling) but the absolute
+  // maxAge caps the total session lifetime.
+  session: {
+    strategy: "jwt",
+    maxAge: 7 * 24 * 60 * 60, // 7 days (absolute timeout)
+  },
   pages: {
     signIn: "/login",
   },

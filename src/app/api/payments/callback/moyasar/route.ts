@@ -17,6 +17,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { writeAudit } from "@/lib/services/audit";
 import { verifyMoyasarWebhook, isGatewayConfigured } from "@/lib/services/webhook-verify";
+import { alertWebhookSignatureFailure } from "@/lib/services/alerting";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -80,6 +81,11 @@ export async function POST(req: NextRequest) {
       action: "WEBHOOK_REJECTED_SIGNATURE",
       entity: "Payment",
       metadata: { gateway: "moyasar", paymentId: payload?.id },
+    });
+    await alertWebhookSignatureFailure({
+      gateway: "moyasar",
+      paymentId: payload?.id,
+      ip: req.headers.get("x-forwarded-for") || undefined,
     });
     // Return 401 so Moyasar retries with a valid signature
     return NextResponse.json(

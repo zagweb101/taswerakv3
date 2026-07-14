@@ -138,7 +138,7 @@ export function SignupForm() {
                 minLength={8}
                 value={form.password}
                 onChange={update("password")}
-                placeholder="8 أحرف على الأقل"
+                placeholder="8 أحرف، حرف كبير، حرف صغير، رقم، رمز خاص"
                 className="pr-10 pl-10 rounded-xl h-11"
                 disabled={pending}
               />
@@ -151,6 +151,9 @@ export function SignupForm() {
                 {showPwd ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
             </div>
+            <p className="text-xs text-muted-foreground">
+              يجب أن تحتوي على: 8 أحرف على الأقل، حرف كبير، حرف صغير، رقم، رمز خاص
+            </p>
           </div>
 
           <Button

@@ -13,7 +13,13 @@ import { sendWelcomeEmail } from "@/lib/services/marketing-email";
 const schema = z.object({
   name: z.string().min(2, "الاسم قصير جداً"),
   email: z.string().email("بريد غير صحيح"),
-  password: z.string().min(8, "كلمة المرور يجب أن تكون 8 أحرف على الأقل"),
+  password: z
+    .string()
+    .min(8, "كلمة المرور يجب أن تكون 8 أحرف على الأقل")
+    .regex(/[a-z]/, "كلمة المرور يجب أن تحتوي على حرف صغير واحد على الأقل")
+    .regex(/[A-Z]/, "كلمة المرور يجب أن تحتوي على حرف كبير واحد على الأقل")
+    .regex(/[0-9]/, "كلمة المرور يجب أن تحتوي على رقم واحد على الأقل")
+    .regex(/[^a-zA-Z0-9]/, "كلمة المرور يجب أن تحتوي على رمز خاص واحد على الأقل"),
   phone: z.string().optional(),
   referralCode: z.string().optional(),
 });

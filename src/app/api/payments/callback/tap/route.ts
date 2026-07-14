@@ -23,6 +23,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { writeAudit } from "@/lib/services/audit";
 import { verifyTapWebhook, isGatewayConfigured } from "@/lib/services/webhook-verify";
+import { alertWebhookSignatureFailure } from "@/lib/services/alerting";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -85,6 +86,11 @@ export async function POST(req: NextRequest) {
       action: "WEBHOOK_REJECTED_SIGNATURE",
       entity: "Payment",
       metadata: { gateway: "tap", chargeId: payload?.id },
+    });
+    await alertWebhookSignatureFailure({
+      gateway: "tap",
+      paymentId: payload?.id,
+      ip: req.headers.get("x-forwarded-for") || undefined,
     });
     return NextResponse.json(
       { ok: false, error: "Signature verification failed" },
